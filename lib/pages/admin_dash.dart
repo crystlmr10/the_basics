@@ -202,24 +202,24 @@ class _AdminDashboardState extends State<AdminDashboard> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 15),
       color: Colors.white,
-      child: Row(
+      child: const Row(
         children: [
-          const Text(
+          Text(
             "Dashboard / Overview",
             style: TextStyle(color: Colors.grey),
           ),
-          const Spacer(),
-          const Text(
+          Spacer(),
+          Text(
             "02:13:29 PM \nWED, 25 FEB 2026",
             textAlign: TextAlign.right,
             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
           ),
-          const SizedBox(width: 20),
-          const Icon(Icons.notifications_none, color: Colors.black),
-          const SizedBox(width: 20),
-          const CircleAvatar(radius: 16, backgroundColor: Colors.blueGrey),
-          const SizedBox(width: 10),
-          const Column(
+          SizedBox(width: 20),
+          Icon(Icons.notifications_none, color: Colors.black),
+          SizedBox(width: 20),
+          CircleAvatar(radius: 16, backgroundColor: Colors.blueGrey),
+          SizedBox(width: 10),
+          Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
@@ -308,20 +308,20 @@ class _AdminDashboardState extends State<AdminDashboard> {
       ),
       child: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.all(16.0),
+          const Padding(
+            padding: EdgeInsets.all(16.0),
             child: Row(
               children: [
-                const Icon(Icons.location_on_outlined, size: 18),
-                const SizedBox(width: 8),
-                const Text(
+                Icon(Icons.location_on_outlined, size: 18),
+                SizedBox(width: 8),
+                Text(
                   "Live Sensor Map - Cebu City",
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
-                const Spacer(),
-                const _MapLegend(color: Colors.green, label: "Normal"),
-                const _MapLegend(color: Colors.orange, label: "Warning"),
-                const _MapLegend(color: Colors.red, label: "Critical"),
+                Spacer(),
+                _MapLegend(color: Colors.green, label: "Normal"),
+                _MapLegend(color: Colors.orange, label: "Warning"),
+                _MapLegend(color: Colors.red, label: "Critical"),
               ],
             ),
           ),
@@ -385,10 +385,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
         color: Colors.white,
         borderRadius: BorderRadius.circular(15),
       ),
-      child: Column(
+      child: const Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
+          Row(
             children: [
               Icon(Icons.access_time, size: 18),
               SizedBox(width: 8),
@@ -398,22 +398,22 @@ class _AdminDashboardState extends State<AdminDashboard> {
               ),
             ],
           ),
-          const Divider(),
-          const _EventItem(
+          Divider(),
+          _EventItem(
             tag: "[CRITICAL]",
             time: "10:42 AM",
             color: Colors.red,
             message: "Sensor ID #C-01 (Colon) reports 3ft water level.",
             subMessage: "Alert dispatched to traffic units.",
           ),
-          const _EventItem(
+          _EventItem(
             tag: "[WARNING]",
             time: "10:15 AM",
             color: Colors.orange,
             message: "Sensor ID #B-14 (Banilad) showing rapid increase.",
             subMessage: "",
           ),
-          const _EventItem(
+          _EventItem(
             tag: "[SYSTEM]",
             time: "08:00 AM",
             color: Colors.blue,
