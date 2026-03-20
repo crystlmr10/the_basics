@@ -5,16 +5,25 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../main.dart'; 
 import 'live_map.dart'; 
+import 'sensor_network.dart';
+import 'historical_logs.dart';
+import 'smart_hub_alerts.dart';
+import 'rescue_center.dart';
+import 'access_control_page.dart';
+import 'settings_page.dart';
 
+// Admin dashboard shell: navigation + page composition.
 class AdminDashboard extends StatefulWidget {
-  const AdminDashboard({super.key});
+  final int initialIndex;
+  final AppSettingsController settings;
+  const AdminDashboard({super.key, this.initialIndex = 0, required this.settings});
 
   @override
   State<AdminDashboard> createState() => _AdminDashboardState();
 }
 
 class _AdminDashboardState extends State<AdminDashboard> {
-  int _selectedIndex = 0;
+  late int _selectedIndex;
   String selectedFilter = 'All Sensors';
 
   final Color primaryBlack = const Color(0xFF1A1A1B);
@@ -24,6 +33,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
   final Stream<List<Map<String, dynamic>>> _sensorStream = Supabase.instance.client
       .from('sensors')
       .stream(primaryKey: ['id']);
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedIndex = widget.initialIndex.clamp(0, 7);
+  }
 
   void _showUsersList() {
     showDialog(
@@ -83,11 +98,14 @@ class _AdminDashboardState extends State<AdminDashboard> {
             unselectedLabelTextStyle: const TextStyle(color: Colors.white38),
             selectedIconTheme: const IconThemeData(color: Colors.white),
             selectedLabelTextStyle: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-            destinations: const [
+            destinations: [
               NavigationRailDestination(icon: Icon(Icons.grid_view), label: Text("Dashboard")),
               NavigationRailDestination(icon: Icon(Icons.map_outlined), label: Text("Live Map View")),
               NavigationRailDestination(icon: Icon(Icons.sensors), label: Text("Sensor Network")),
               NavigationRailDestination(icon: Icon(Icons.history), label: Text("Historical Data Logs")),
+              NavigationRailDestination(icon: const Icon(Icons.notifications_active_outlined), label: const Text("Alert & Notification")),
+              NavigationRailDestination(icon: const _RescuePersonShadowNavIcon(), label: const Text("Rescue Center")),
+              NavigationRailDestination(icon: const Icon(Icons.admin_panel_settings_outlined), label: const Text("Access Control")),
               NavigationRailDestination(icon: Icon(Icons.settings_outlined), label: Text("Settings")),
             ],
             trailing: Expanded(
@@ -111,9 +129,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     children: [
                       _buildDashboardContent(), 
                       const LiveMapView(), 
-                      const Center(child: Text("Sensor Network Page")),
-                      const Center(child: Text("Historical Logs Page")),
-                      const Center(child: Text("Settings Page")),
+                      const SensorNetworkPage(),
+                      const HistoricalLogsPage(),
+                      SmartHubAlertsPage(settings: widget.settings),
+                      const RescueCenterPage(),
+                      const AccessControlPage(),
+                      SettingsPage(settings: widget.settings),
                     ],
                   ),
                 ),
@@ -211,12 +232,23 @@ class _AdminDashboardState extends State<AdminDashboard> {
   Widget _buildSidebarHeader() { return const Padding(padding: EdgeInsets.symmetric(vertical: 30, horizontal: 20), child: Row(children: [Icon(Icons.shield_outlined, color: Colors.white, size: 30), SizedBox(width: 10), Text("Floote", style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold))])); }
   
   Widget _buildTopBar() { 
+    String breadcrumb = switch (_selectedIndex) {
+      0 => "Dashboard / Overview",
+      1 => "Dashboard / Live Map View",
+      2 => "Dashboard / Sensor Network",
+      3 => "Dashboard / Historical Data Logs",
+      4 => "Dashboard / Alert & Notification",
+      5 => "Dashboard / Rescue Center",
+      6 => "Dashboard / Access Control",
+      7 => "Dashboard / Settings",
+      _ => "Dashboard",
+    };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 15), 
       color: Colors.white, 
       child: Row(
         children: [
-          Text(_selectedIndex == 0 ? "Dashboard / Overview" : "Dashboard / Live Map", style: const TextStyle(color: Colors.grey, fontSize: 13)), 
+          Text(breadcrumb, style: const TextStyle(color: Colors.grey, fontSize: 13)), 
           const Spacer(), 
           InkWell(
             onTap: _showUsersList, 
@@ -263,7 +295,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     ); 
   }
 
-  Widget _buildLogoutButton() { return Material(color: Colors.transparent, child: InkWell(onTap: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const FlooteLoginScreen())), child: Container(padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 20), child: const Row(children: [Icon(Icons.logout, color: Colors.redAccent, size: 20), SizedBox(width: 12), Text("Logout Session", style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 13))])))); }
+  Widget _buildLogoutButton() { return Material(color: Colors.transparent, child: InkWell(onTap: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => FlooteLoginScreen(settings: widget.settings))), child: Container(padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 20), child: const Row(children: [Icon(Icons.logout, color: Colors.redAccent, size: 20), SizedBox(width: 12), Text("Logout Session", style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 13))])))); }
   Widget _buildSystemStatus() { return Container(margin: const EdgeInsets.only(bottom: 20), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(20)), child: const Row(mainAxisSize: MainAxisSize.min, children: [CircleAvatar(radius: 4, backgroundColor: Colors.white), SizedBox(width: 8), Text("LoRa Connected", style: TextStyle(color: Colors.white, fontSize: 12))])); }
   Widget _buildSystemHealthCard() { return Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: const Border(left: BorderSide(color: Colors.blue, width: 6))), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text("System Health", style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)), Icon(Icons.monitor_heart, color: Colors.blue.withValues(alpha: 0.3))]), const Text("Normal Operation", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)), const SizedBox(height: 8), const Text("All core services running", style: TextStyle(color: Colors.blue, fontSize: 11))])); }
   Widget _buildRecentEventsCard() { return Container(height: 450, padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(15)), child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [Icon(Icons.access_time, size: 18), SizedBox(width: 8), Text("Recent Events", style: TextStyle(fontWeight: FontWeight.bold))]), Divider(), _EventItem(tag: "[SYSTEM]", time: "08:00 AM", color: Colors.blue, message: "Sensors Online", subMessage: "")])); }
@@ -273,3 +305,24 @@ class _AdminDashboardState extends State<AdminDashboard> {
 class _MapLegend extends StatelessWidget { final Color color; final String label; const _MapLegend({required this.color, required this.label}); @override Widget build(BuildContext context) { return Padding(padding: const EdgeInsets.only(left: 12), child: Row(children: [CircleAvatar(radius: 4, backgroundColor: color), const SizedBox(width: 4), Text(label, style: const TextStyle(fontSize: 10))])); } }
 class _EventItem extends StatelessWidget { final String tag, time, message, subMessage; final Color color; const _EventItem({required this.tag, required this.time, required this.color, required this.message, required this.subMessage}); @override Widget build(BuildContext context) { return Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(tag, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 11)), Text(time, style: const TextStyle(color: Colors.grey, fontSize: 11))]), const SizedBox(height: 4), Text(message, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500))])); } }
 class StatCard extends StatelessWidget { final String title, value, sub; final Color color; final IconData icon; const StatCard({super.key, required this.title, required this.value, required this.sub, required this.color, required this.icon}); @override Widget build(BuildContext context) { return Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border(left: BorderSide(color: color, width: 6))), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(title, style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, fontSize: 12)), Icon(icon, color: color.withValues(alpha: 0.3))]), const SizedBox(height: 8), Text(value, style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold)), Text(sub, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold))])); } }
+
+class _RescuePersonShadowNavIcon extends StatelessWidget {
+  const _RescuePersonShadowNavIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = IconTheme.of(context).color ?? Colors.white;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        // Shadow part (slightly offset)
+        Positioned(
+          left: 1,
+          top: 2,
+          child: Icon(Icons.person, size: 22, color: c.withValues(alpha: 0.25)),
+        ),
+        Icon(Icons.person_outline, size: 22, color: c),
+      ],
+    );
+  }
+}

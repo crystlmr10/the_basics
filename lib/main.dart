@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'pages/settings_page.dart';
 import 'pages/admin_dash.dart'; // Ensure this matches your dashboard file name
 
+// App entry: bootstraps Supabase + global settings controller.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -14,26 +16,80 @@ Future<void> main() async {
   runApp(const AdminApp());
 }
 
-class AdminApp extends StatelessWidget {
+class AdminApp extends StatefulWidget {
   const AdminApp({super.key});
 
   @override
+  State<AdminApp> createState() => _AdminAppState();
+}
+
+class _AdminAppState extends State<AdminApp> {
+  final AppSettingsController _settings = AppSettingsController();
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _init();
+  }
+
+  Future<void> _init() async {
+    await _settings.load();
+    if (!mounted) return;
+    setState(() => _loaded = true);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Floote Admin Control',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1A1A1B)),
-        useMaterial3: true,
+    if (!_loaded) {
+      return const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(body: Center(child: CircularProgressIndicator())),
+      );
+    }
+
+    return AnimatedBuilder(
+      animation: _settings,
+      builder: (context, _) => MaterialApp(
+        title: 'Floote Admin Control',
+        debugShowCheckedModeBanner: false,
+        scrollBehavior: const AppScrollBehavior(),
+        themeMode: _settings.themeMode,
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(seedColor: _settings.primaryColor),
+          useMaterial3: true,
+        ),
+        darkTheme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: _settings.primaryColor,
+            brightness: Brightness.dark,
+          ),
+          useMaterial3: true,
+        ),
+        // This is the screen your logout button routes back to
+        home: FlooteLoginScreen(settings: _settings),
       ),
-      // This is the screen your logout button routes back to
-      home: const FlooteLoginScreen(), 
+    );
+  }
+}
+
+class AppScrollBehavior extends MaterialScrollBehavior {
+  const AppScrollBehavior();
+
+  @override
+  Widget buildScrollbar(BuildContext context, Widget child, ScrollableDetails details) {
+    return Scrollbar(
+      controller: details.controller,
+      thumbVisibility: false,
+      trackVisibility: false,
+      child: child,
     );
   }
 }
 
 class FlooteLoginScreen extends StatefulWidget {
-  const FlooteLoginScreen({super.key});
+  final AppSettingsController settings;
+  const FlooteLoginScreen({super.key, required this.settings});
 
   @override
   State<FlooteLoginScreen> createState() => _FlooteLoginScreenState();
@@ -79,7 +135,12 @@ class _FlooteLoginScreenState extends State<FlooteLoginScreen> {
         if (mounted) {
           Navigator.pushReplacement(
             context,
-            MaterialPageRoute(builder: (context) => const AdminDashboard()),
+            MaterialPageRoute(
+              builder: (context) => AdminDashboard(
+                initialIndex: 0,
+                settings: widget.settings,
+              ),
+            ),
           );
         }
       } else {

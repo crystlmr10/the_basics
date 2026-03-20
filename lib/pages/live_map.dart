@@ -6,6 +6,8 @@ import 'package:latlong2/latlong.dart';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+// Live map page:
+// real-time sensor/user-report map plus admin road-status actions.
 class LiveMapView extends StatefulWidget {
 
   const LiveMapView({super.key});
