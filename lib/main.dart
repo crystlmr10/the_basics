@@ -1,16 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'pages/settings_page.dart';
-import 'pages/admin_dash.dart'; // Ensure this matches your dashboard file name
+import 'pages/admin_dash.dart'; 
 
 // App entry: bootstraps Supabase + global settings controller.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize Supabase for the Admin Website
+  // Initialize Supabase
   await Supabase.initialize(
     url: 'https://ttsrktldvvqrgkfhsbbl.supabase.co',
-    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR0c3JrdGxkdnZxcmdrZmhzYmJsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI1NDYxODcsImV4cCI6MjA4ODEyMjE4N30.DkQAOtyA4gezkPFCWPtyoS2UKw2NYvZcAlsAWbql3QY', // Paste your real anon key here!
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR0c3JrdGxkdnZxcmdrZmhzYmJsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI1NDYxODcsImV4cCI6MjA4ODEyMjE4N30.DkQAOtyA4gezkPFCWPtyoS2UKw2NYvZcAlsAWbql3QY',
   );
 
   runApp(const AdminApp());
@@ -66,7 +66,6 @@ class _AdminAppState extends State<AdminApp> {
           ),
           useMaterial3: true,
         ),
-        // This is the screen your logout button routes back to
         home: FlooteLoginScreen(settings: _settings),
       ),
     );
@@ -96,7 +95,6 @@ class FlooteLoginScreen extends StatefulWidget {
 }
 
 class _FlooteLoginScreenState extends State<FlooteLoginScreen> {
-  // Changed controller name to reflect it takes an ID, not a full email
   final _adminIdController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _isLoading = false;
@@ -109,51 +107,62 @@ class _FlooteLoginScreenState extends State<FlooteLoginScreen> {
   }
 
   Future<void> _adminLogin() async {
+    final adminID = _adminIdController.text.trim();
+    final password = _passwordController.text;
+
+    if (adminID.isEmpty || password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Please enter both Admin ID and Password")),
+      );
+      return;
+    }
+
     setState(() => _isLoading = true);
+
     try {
-      final adminID = _adminIdController.text.trim();
-      final password = _passwordController.text;
+      // 1. LOOKUP: Find the email and role associated with the Admin ID (username)
+      // This maps "admin.1" to "gironcrystalmarie@gmail.com"
+      final userQuery = await Supabase.instance.client
+          .from('profiles')
+          .select('email, role')
+          .eq('username', adminID)
+          .maybeSingle();
 
-      // 1. Format the ID to match the admin dummy email we created in Supabase
-      String formattedEmail = "$adminID@admin.floote.com";
+      if (userQuery == null) {
+        throw Exception("Admin ID '$adminID' not found.");
+      }
 
-      // 2. Send the formatted credentials to Supabase for verification
-      final AuthResponse res = await Supabase.instance.client.auth.signInWithPassword(
-        email: formattedEmail,
+      final String realEmail = userQuery['email'];
+      final String role = userQuery['role'];
+
+      // 2. ROLE CHECK: Verify they are actually an admin
+      if (role != 'admin') {
+        throw Exception("Access Denied: This ID does not have admin privileges.");
+      }
+
+      // 3. AUTHENTICATE: Log in with the real email and password
+      await Supabase.instance.client.auth.signInWithPassword(
+        email: realEmail,
         password: password,
       );
 
-      // 3. Double-check they actually have admin privileges in the profiles table
-      final profile = await Supabase.instance.client
-          .from('profiles')
-          .select('role')
-          .eq('id', res.user!.id)
-          .single();
-
-      if (profile['role'] == 'admin') {
-        // 4. If successful, push them to the Dashboard
-        if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (context) => AdminDashboard(
-                initialIndex: 0,
-                settings: widget.settings,
-              ),
+      // 4. NAVIGATION: Success!
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => AdminDashboard(
+              initialIndex: 0,
+              settings: widget.settings,
             ),
-          );
-        }
-      } else {
-        // Kick them out if a standard user tries to log in here
-        await Supabase.instance.client.auth.signOut();
-        throw Exception("Access Denied: Not an authorized admin account.");
+          ),
+        );
       }
     } catch (e) {
-      // 5. If it fails, show an error
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Login failed: Invalid Admin ID or Password'),
+          SnackBar(
+            content: Text('Login failed: ${e.toString().replaceAll("Exception:", "")}'),
             backgroundColor: Colors.redAccent,
           ),
         );
@@ -166,10 +175,10 @@ class _FlooteLoginScreenState extends State<FlooteLoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF4F7FA), // Matches your dashboard background
+      backgroundColor: const Color(0xFFF4F7FA),
       body: Center(
         child: Container(
-          width: 400, // Keeps the login box a nice fixed size on a web browser
+          width: 400,
           padding: const EdgeInsets.all(32),
           decoration: BoxDecoration(
             color: Colors.white,
@@ -196,15 +205,13 @@ class _FlooteLoginScreenState extends State<FlooteLoginScreen> {
                 style: TextStyle(color: Colors.grey, fontSize: 13),
               ),
               const SizedBox(height: 32),
-              
-              // Changed from Email to Admin ID input
               TextField(
                 controller: _adminIdController,
                 decoration: const InputDecoration(
                   labelText: "Admin ID",
                   hintText: "e.g., admin.1",
                   border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.person_outline), // Updated icon
+                  prefixIcon: Icon(Icons.person_outline),
                 ),
               ),
               const SizedBox(height: 16),

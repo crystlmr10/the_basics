@@ -1,18 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-// Sensor network page:
-// LoRa connection health + water level status + map markers.
 enum SensorConnectionStatus { online, offline }
 
 class SensorNodeStatus {
-  final String locationName; // e.g., "Tabunok, Talisay"
-  final String municipality; // e.g., "Talisay"
-  final String barangay; // e.g., "Tabunok"
+  final String locationName;
+  final String municipality;
+  final String barangay;
   final SensorConnectionStatus loraStatus;
-  final int? rssiDbm; // negative dBm (null when offline / unknown)
-  final double waterLevelCm; // JSN-SR04T measurement (cm)
+  final int? rssiDbm;
+  final double waterLevelCm;
   final int batteryPercent;
   final String sensorId;
   final DateTime lastSeen;
@@ -30,6 +29,25 @@ class SensorNodeStatus {
     required this.lastSeen,
     required this.position,
   });
+
+  factory SensorNodeStatus.fromRecord(Map<String, dynamic> rec) {
+    final recordedAtStr = rec['recorded_at'] as String?;
+    final lastSeenDate = DateTime.tryParse(recordedAtStr ?? '') ?? DateTime.now();
+    final bool onlineFlag = rec['is_online'] ?? (DateTime.now().difference(lastSeenDate).inMinutes < 10);
+    
+    return SensorNodeStatus(
+      locationName: rec['location_name'] as String? ?? 'Unknown',
+      municipality: rec['municipality'] as String? ?? 'Unknown',
+      barangay: rec['barangay'] as String? ?? 'Unknown',
+      loraStatus: onlineFlag ? SensorConnectionStatus.online : SensorConnectionStatus.offline,
+      rssiDbm: rec['rssi_dbm'] as int?,
+      waterLevelCm: (rec['water_level_cm'] as num? ?? 0).toDouble(),
+      batteryPercent: rec['battery_percent'] as int? ?? 0,
+      sensorId: rec['sensor_id'] as String? ?? 'Unknown',
+      lastSeen: lastSeenDate,
+      position: LatLng(rec['latitude'] as double? ?? 0.0, rec['longitude'] as double? ?? 0.0),
+    );
+  }
 }
 
 class SensorNetworkPage extends StatefulWidget {
@@ -40,100 +58,153 @@ class SensorNetworkPage extends StatefulWidget {
 }
 
 class _SensorNetworkPageState extends State<SensorNetworkPage> {
-  // Static sample data per requirements (replace with Supabase stream later).
-  late final List<SensorNodeStatus> _nodes = [
-    SensorNodeStatus(
-      locationName: 'Tabunok, Talisay',
-      municipality: 'Talisay',
-      barangay: 'Tabunok',
-      loraStatus: SensorConnectionStatus.online,
-      rssiDbm: -85,
-      waterLevelCm: 12,
-      batteryPercent: 78,
-      sensorId: 'LORA-001',
-      lastSeen: DateTime.now().subtract(const Duration(minutes: 2)),
-      // Tabunok, Talisay City (approx.)
-      position: const LatLng(10.26, 123.84),
-    ),
-    SensorNodeStatus(
-      locationName: 'Linao, Talisay City',
-      municipality: 'Talisay',
-      barangay: 'Linao',
-      loraStatus: SensorConnectionStatus.offline,
-      rssiDbm: null,
-      waterLevelCm: 0,
-      batteryPercent: 52,
-      sensorId: 'LORA-002',
-      lastSeen: DateTime.now().subtract(const Duration(hours: 5, minutes: 18)),
-      // Linao, Talisay City (approx.)
-      position: const LatLng(10.26, 123.82),
-    ),
-    SensorNodeStatus(
-      locationName: 'Bulacao',
-      municipality: 'Cebu City',
-      barangay: 'Bulacao',
-      loraStatus: SensorConnectionStatus.online,
-      rssiDbm: -92,
-      waterLevelCm: 28,
-      batteryPercent: 64,
-      sensorId: 'LORA-003',
-      lastSeen: DateTime.now().subtract(const Duration(minutes: 7)),
-      // Bulacao (approx.)
-      position: const LatLng(10.27, 123.85),
-    ),
-  ];
-
+  late final Stream<List<SensorNodeStatus>> _nodesStream;
+  List<SensorNodeStatus> _nodes = [];
   SensorNodeStatus? _selected;
 
   @override
   void initState() {
     super.initState();
-    _selected = _nodes.first;
+    _nodesStream = Supabase.instance.client
+        .from('sensor_logs')
+        .stream(primaryKey: ['id'])
+        .order('recorded_at', ascending: false)
+        .map((recs) {
+          final Map<String, SensorNodeStatus> uniqueMap = {};
+          for (var r in recs) {
+            final node = SensorNodeStatus.fromRecord(r);
+            if (!uniqueMap.containsKey(node.sensorId)) {
+              uniqueMap[node.sensorId] = node;
+            }
+          }
+          return uniqueMap.values.toList();
+        });
+  }
+
+  void _showSensorHistory(SensorNodeStatus node) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            const Icon(Icons.history, color: Colors.blue),
+            const SizedBox(width: 12),
+            Expanded(child: Text("${node.locationName} Reports", style: const TextStyle(fontWeight: FontWeight.bold))),
+            IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
+          ],
+        ),
+        content: SizedBox(
+          width: 550,
+          height: 600,
+          child: FutureBuilder<List<Map<String, dynamic>>>(
+            future: Supabase.instance.client
+                .from('sensor_logs')
+                .select()
+                .eq('sensor_id', node.sensorId)
+                .order('recorded_at', ascending: false),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                return const Center(child: Text("No historical reports available."));
+              }
+              final logs = snapshot.data!;
+              return ListView.separated(
+                itemCount: logs.length,
+                separatorBuilder: (_, __) => const Divider(),
+                itemBuilder: (context, i) {
+                  final log = logs[i];
+                  final cm = (log['water_level_cm'] as num).toDouble();
+                  final int rssi = log['rssi_dbm'] as int? ?? 0;
+                  final time = DateTime.tryParse(log['recorded_at'] ?? '') ?? DateTime.now();
+                  
+                  return ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: cm < 15 ? Colors.green : (cm <= 30 ? Colors.orange : Colors.red),
+                      radius: 8,
+                    ),
+                    title: Text("${cm.toStringAsFixed(0)} cm", style: const TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text("Time: ${time.hour}:${time.minute.toString().padLeft(2, '0')} - ${time.month}/${time.day}"),
+                    trailing: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text("${log['battery_percent']}% 🔋", style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                        const SizedBox(height: 2),
+                        Text("$rssi dBm 📶", 
+                          style: TextStyle(
+                            fontSize: 10, 
+                            fontWeight: FontWeight.bold,
+                            color: rssi > -70 ? Colors.green : (rssi > -90 ? Colors.orange : Colors.red)
+                          )
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    final total = _nodes.length;
-    final online = _nodes.where((n) => n.loraStatus == SensorConnectionStatus.online).length;
-    final offline = _nodes.where((n) => n.loraStatus == SensorConnectionStatus.offline).length;
-    final lowSignal = _nodes.where((n) => _isLowSignal(n.rssiDbm)).length;
+    return StreamBuilder<List<SensorNodeStatus>>(
+      stream: _nodesStream,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting && _nodes.isEmpty) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) return Center(child: Text('Error: ${snapshot.error}'));
 
-    final size = MediaQuery.of(context).size;
-    final isWide = size.width >= 1100;
+        _nodes = snapshot.data ?? _nodes;
+        
+        if (_nodes.isNotEmpty && _selected == null) {
+          _selected = _nodes.first;
+        }
+        
+        if (_selected != null) {
+          final fresh = _nodes.where((n) => n.sensorId == _selected!.sensorId);
+          if (fresh.isNotEmpty) _selected = fresh.first;
+        }
 
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: isWide
-          ? Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(flex: 2, child: _buildLeftListCard(context)),
-                const SizedBox(width: 24),
-                Expanded(
-                  flex: 3,
-                  child: _buildRightDashboard(context, scheme, total, online, offline, lowSignal),
+        final size = MediaQuery.of(context).size;
+        final isWide = size.width >= 1100;
+
+        return Padding(
+          padding: const EdgeInsets.all(24),
+          child: isWide
+              ? Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(flex: 2, child: _buildLeftListCard(context)),
+                    const SizedBox(width: 24),
+                    Expanded(flex: 3, child: _buildRightDashboard(context, scheme)),
+                  ],
+                )
+              : ListView(
+                  children: [
+                    _buildLeftListCard(context),
+                    const SizedBox(height: 16),
+                    _buildRightDashboard(context, scheme),
+                  ],
                 ),
-              ],
-            )
-          : Column(
-              children: [
-                SizedBox(height: 520, child: _buildLeftListCard(context)),
-                const SizedBox(height: 16),
-                SizedBox(
-                  height: (size.height - 24 - 24 - 16).clamp(520.0, 740.0),
-                  child: _buildRightDashboard(context, scheme, total, online, offline, lowSignal),
-                ),
-              ],
-            ),
+        );
+      },
     );
   }
 
   Widget _buildLeftListCard(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-
     return Container(
+      height: 550,
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
@@ -143,27 +214,14 @@ class _SensorNetworkPageState extends State<SensorNetworkPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
+            padding: const EdgeInsets.all(20),
             child: Row(
               children: [
                 Icon(Icons.sensors, color: scheme.primary),
                 const SizedBox(width: 10),
-                const Text(
-                  'Sensor Network',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-                ),
+                const Text('Sensor Network', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                 const Spacer(),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: scheme.primary.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    '${_nodes.length} nodes',
-                    style: TextStyle(color: scheme.primary, fontWeight: FontWeight.w700, fontSize: 12),
-                  ),
-                ),
+                Text('${_nodes.length} Active Nodes', style: TextStyle(color: scheme.primary, fontWeight: FontWeight.bold, fontSize: 12)),
               ],
             ),
           ),
@@ -175,11 +233,14 @@ class _SensorNetworkPageState extends State<SensorNetworkPage> {
               separatorBuilder: (_, __) => const SizedBox(height: 12),
               itemBuilder: (context, index) {
                 final node = _nodes[index];
-                final selected = identical(node, _selected);
+                final isSelected = _selected?.sensorId == node.sensorId;
                 return _SensorNodeCard(
                   node: node,
-                  selected: selected,
-                  onTap: () => setState(() => _selected = node),
+                  selected: isSelected,
+                  onTap: () {
+                    setState(() => _selected = node);
+                    _showSensorHistory(node);
+                  },
                 );
               },
             ),
@@ -189,20 +250,15 @@ class _SensorNetworkPageState extends State<SensorNetworkPage> {
     );
   }
 
-  Widget _buildRightDashboard(
-    BuildContext context,
-    ColorScheme scheme,
-    int total,
-    int online,
-    int offline,
-    int lowSignal,
-  ) {
+  Widget _buildRightDashboard(BuildContext context, ColorScheme scheme) {
+    final online = _nodes.where((n) => n.loraStatus == SensorConnectionStatus.online).length;
+    final offline = _nodes.where((n) => n.loraStatus == SensorConnectionStatus.offline).length;
+    final lowSignal = _nodes.where((n) => (n.rssiDbm ?? 0) <= -90).length;
+
     return Column(
       children: [
         Row(
           children: [
-            Expanded(child: _SummaryCard(title: 'Total Sensors', value: '$total', icon: Icons.sensors, color: scheme.primary)),
-            const SizedBox(width: 12),
             Expanded(child: _SummaryCard(title: 'Online', value: '$online', icon: Icons.wifi, color: Colors.green)),
             const SizedBox(width: 12),
             Expanded(child: _SummaryCard(title: 'Offline', value: '$offline', icon: Icons.wifi_off, color: Colors.redAccent)),
@@ -211,66 +267,36 @@ class _SensorNetworkPageState extends State<SensorNetworkPage> {
           ],
         ),
         const SizedBox(height: 16),
-        Expanded(
-          child: Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: Stack(
-                children: [
-                  FlutterMap(
-                    options: MapOptions(
-                      initialCenter: const LatLng(10.26, 123.84),
-                      initialZoom: 13,
-                      onTap: (_, __) => FocusScope.of(context).unfocus(),
+        Container(
+          height: 480,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: FlutterMap(
+              options: const MapOptions(initialCenter: LatLng(10.26, 123.84), initialZoom: 13),
+              children: [
+                TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'),
+                MarkerLayer(
+                  markers: _nodes.map((n) => Marker(
+                    point: n.position,
+                    width: 45, height: 45,
+                    child: Icon(
+                      Icons.location_on,
+                      size: 40,
+                      color: n.loraStatus == SensorConnectionStatus.online ? Colors.green : Colors.redAccent,
                     ),
-                    children: [
-                      TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', userAgentPackageName: 'the_basics'),
-                      MarkerLayer(
-                        markers: _nodes
-                            .map(
-                              (n) => Marker(
-                                point: n.position,
-                                width: 46,
-                                height: 46,
-                                child: GestureDetector(
-                                  onTap: () => setState(() => _selected = n),
-                                  child: Icon(
-                                    Icons.location_on,
-                                    size: 40,
-                                    color: n.loraStatus == SensorConnectionStatus.online ? Colors.green : Colors.redAccent,
-                                  ),
-                                ),
-                              ),
-                            )
-                            .toList(),
-                      ),
-                    ],
-                  ),
-                  if (_selected != null)
-                    Positioned(
-                      left: 16,
-                      top: 16,
-                      child: _MapInfoPill(node: _selected!),
-                    ),
-                ],
-              ),
+                  )).toList(),
+                ),
+              ],
             ),
           ),
         ),
       ],
     );
-  }
-
-  static bool _isLowSignal(int? rssiDbm) {
-    // LoRa/ESP32 RSSI is negative; closer to 0 is stronger.
-    // Consider <= -90 dBm as low (tunable).
-    if (rssiDbm == null) return false;
-    return rssiDbm <= -90;
   }
 }
 
@@ -279,278 +305,120 @@ class _SensorNodeCard extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
 
-  const _SensorNodeCard({
-    required this.node,
-    required this.selected,
-    required this.onTap,
-  });
+  const _SensorNodeCard({required this.node, required this.selected, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     final statusColor = node.loraStatus == SensorConnectionStatus.online ? Colors.green : Colors.redAccent;
-    final borderColor = selected ? scheme.primary.withValues(alpha: 0.65) : Colors.black.withValues(alpha: 0.08);
+    final waterColor = node.waterLevelCm < 15 ? Colors.green : (node.waterLevelCm <= 30 ? Colors.orange : Colors.redAccent);
+    
+    final int signal = node.rssiDbm ?? -120;
+    final Color signalColor = signal > -70 ? Colors.green : (signal > -90 ? Colors.orange : Colors.red);
 
-    final waterColor = _waterLevelColor(node.waterLevelCm);
-    final progress = (node.waterLevelCm / 50).clamp(0.0, 1.0);
-
-    return Material(
-      color: Colors.white,
+    return InkWell(
+      onTap: onTap,
       borderRadius: BorderRadius.circular(14),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(14),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: borderColor, width: selected ? 1.5 : 1),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: selected ? 0.06 : 0.03),
-                blurRadius: 16,
-                offset: const Offset(0, 8),
-              ),
-            ],
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: selected ? Theme.of(context).primaryColor : Colors.black.withValues(alpha: 0.08), 
+            width: selected ? 2 : 1
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          node.locationName,
-                          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14),
-                        ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            _StatusDot(color: statusColor),
-                            const SizedBox(width: 8),
-                            Text(
-                              node.loraStatus == SensorConnectionStatus.online ? 'Online (LoRa32)' : 'Offline (LoRa32)',
-                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: statusColor),
-                            ),
-                            const SizedBox(width: 10),
-                            _SignalBars(rssiDbm: node.rssiDbm),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  Icon(Icons.chevron_right, color: Colors.black.withValues(alpha: 0.35)),
-                ],
-              ),
-              const SizedBox(height: 14),
-              Row(
-                children: [
-                  const Icon(Icons.water_drop_outlined, size: 16, color: Colors.blueGrey),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Live Water Level: ${node.waterLevelCm.toStringAsFixed(0)} cm',
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(999),
-                child: LinearProgressIndicator(
-                  value: progress,
-                  minHeight: 10,
-                  backgroundColor: Colors.black.withValues(alpha: 0.06),
-                  valueColor: AlwaysStoppedAnimation<Color>(waterColor),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(node.locationName, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+                const Icon(Icons.arrow_forward_ios, size: 12, color: Colors.grey),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Container(width: 8, height: 8, decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle)),
+                const SizedBox(width: 8),
+                Text(node.loraStatus == SensorConnectionStatus.online ? 'Online' : 'Offline', 
+                     style: TextStyle(fontSize: 12, color: statusColor, fontWeight: FontWeight.bold)),
+                const Spacer(),
+                Icon(Icons.podcasts, size: 12, color: signalColor),
+                const SizedBox(width: 4),
+                Text('$signal dBm', style: TextStyle(fontSize: 11, color: signalColor, fontWeight: FontWeight.bold)),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Text('Current Level: ${node.waterLevelCm.toStringAsFixed(0)} cm', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            LinearProgressIndicator(
+              value: (node.waterLevelCm / 60).clamp(0, 1),
+              backgroundColor: Colors.grey.shade100,
+              color: waterColor,
+              minHeight: 8,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                _Badge(icon: Icons.battery_charging_full, label: '${node.batteryPercent}%'),
+                _Badge(icon: Icons.tag, label: node.sensorId),
+                _Badge(icon: Icons.access_time, label: _timeSince(node.lastSeen)),
+                _Badge(
+                  icon: Icons.signal_cellular_alt, 
+                  label: '${node.rssiDbm ?? "N/A"} dBm', 
+                  customColor: signalColor
                 ),
-              ),
-              const SizedBox(height: 14),
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  _MetaChip(icon: Icons.battery_full, label: '${node.batteryPercent}%'),
-                  _MetaChip(icon: Icons.numbers, label: node.sensorId),
-                  _MetaChip(icon: Icons.access_time, label: _formatLastSeen(node.lastSeen)),
-                ],
-              ),
-            ],
-          ),
+              ],
+            ),
+          ],
         ),
       ),
     );
   }
 
-  static Color _waterLevelColor(double cm) {
-    if (cm < 15) return Colors.green;
-    if (cm <= 30) return Colors.orange;
-    return Colors.redAccent;
+  String _timeSince(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+    if (diff.inMinutes < 1) return 'now';
+    if (diff.inHours < 1) return '${diff.inMinutes}m';
+    if (diff.inDays < 1) return '${diff.inHours}h';
+    return '${diff.inDays}d';
   }
+}
 
-  static String _formatLastSeen(DateTime dt) {
-    final now = DateTime.now();
-    final diff = now.difference(dt);
-    if (diff.inMinutes < 1) return 'Last seen: just now';
-    if (diff.inMinutes < 60) return 'Last seen: ${diff.inMinutes}m ago';
-    if (diff.inHours < 24) return 'Last seen: ${diff.inHours}h ago';
-    return 'Last seen: ${diff.inDays}d ago';
-  }
+class _Badge extends StatelessWidget {
+  final IconData icon; 
+  final String label;
+  final Color? customColor;
+  const _Badge({required this.icon, required this.label, this.customColor});
+  
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(icon, size: 12, color: customColor ?? Colors.blueGrey), 
+      const SizedBox(width: 4), 
+      Text(label, style: TextStyle(fontSize: 10, color: customColor ?? Colors.blueGrey, fontWeight: FontWeight.bold))
+    ]
+  );
 }
 
 class _SummaryCard extends StatelessWidget {
-  final String title;
-  final String value;
-  final IconData icon;
-  final Color color;
-
-  const _SummaryCard({
-    required this.title,
-    required this.value,
-    required this.icon,
-    required this.color,
-  });
-
+  final String title, value; final IconData icon; final Color color;
+  const _SummaryCard({required this.title, required this.value, required this.icon, required this.color});
   @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border(left: BorderSide(color: color, width: 6)),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 16, offset: const Offset(0, 10)),
-        ],
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w800, fontSize: 12)),
-                const SizedBox(height: 6),
-                Text(value, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
-              ],
-            ),
-          ),
-          Icon(icon, color: color.withValues(alpha: 0.35), size: 28),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border(left: BorderSide(color: color, width: 6))),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(title, style: const TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 4),
+      Text(value, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+    ]),
+  );
 }
-
-class _StatusDot extends StatelessWidget {
-  final Color color;
-  const _StatusDot({required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 10,
-      height: 10,
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle, boxShadow: [BoxShadow(color: color.withValues(alpha: 0.35), blurRadius: 10)]),
-    );
-  }
-}
-
-class _MetaChip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  const _MetaChip({required this.icon, required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 14, color: Colors.blueGrey),
-          const SizedBox(width: 6),
-          Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
-        ],
-      ),
-    );
-  }
-}
-
-class _SignalBars extends StatelessWidget {
-  final int? rssiDbm;
-  const _SignalBars({required this.rssiDbm});
-
-  @override
-  Widget build(BuildContext context) {
-    final bars = _rssiToBars(rssiDbm);
-    final activeColor = (rssiDbm == null) ? Colors.grey : Colors.blueGrey;
-    final inactiveColor = Colors.black.withValues(alpha: 0.12);
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: List.generate(4, (i) {
-        final active = i < bars;
-        final h = 6.0 + (i * 4.0);
-        return Padding(
-          padding: const EdgeInsets.only(left: 2),
-          child: Container(
-            width: 4,
-            height: h,
-            decoration: BoxDecoration(
-              color: active ? activeColor : inactiveColor,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-        );
-      }),
-    );
-  }
-
-  static int _rssiToBars(int? rssiDbm) {
-    if (rssiDbm == null) return 0;
-    // Map negative RSSI (stronger is closer to 0).
-    // -30..-59 => 4 bars, -60..-74 => 3, -75..-89 => 2, <= -90 => 1
-    if (rssiDbm >= -59) return 4;
-    if (rssiDbm >= -74) return 3;
-    if (rssiDbm >= -89) return 2;
-    return 1;
-  }
-}
-
-class _MapInfoPill extends StatelessWidget {
-  final SensorNodeStatus node;
-  const _MapInfoPill({required this.node});
-
-  @override
-  Widget build(BuildContext context) {
-    final statusColor = node.loraStatus == SensorConnectionStatus.online ? Colors.green : Colors.redAccent;
-    final rssiText = node.rssiDbm == null ? 'RSSI: N/A' : 'RSSI: ${node.rssiDbm} dBm';
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 16, offset: const Offset(0, 10))],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _StatusDot(color: statusColor),
-          const SizedBox(width: 10),
-          Text(node.locationName, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 12)),
-          const SizedBox(width: 10),
-          Text(rssiText, style: const TextStyle(color: Colors.blueGrey, fontSize: 12, fontWeight: FontWeight.w800)),
-        ],
-      ),
-    );
-  }
-}
-

@@ -1,600 +1,338 @@
 import 'package:flutter/material.dart';
-
 import 'package:flutter_map/flutter_map.dart';
-
 import 'package:latlong2/latlong.dart';
-
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-// Live map page:
-// real-time sensor/user-report map plus admin road-status actions.
 class LiveMapView extends StatefulWidget {
-
   const LiveMapView({super.key});
 
   @override
-
   State<LiveMapView> createState() => _LiveMapViewState();
-
 }
-
-
 
 class _LiveMapViewState extends State<LiveMapView> {
-
+  final MapController _mapController = MapController();
   final TextEditingController _searchController = TextEditingController();
 
+  Map<String, dynamic>? _selectedNode;
 
-
-  // --- DATABASE HELPER: UPDATE STATUS IN SUPABASE ---
-
-  Future<void> _updateRoadStatus(String reportId, String status) async {
-
-    try {
-
-      // Physically update the row. This triggers the real-time stream
-
-      await Supabase.instance.client
-
-          .from('user_reports')
-
-          .update({'admin_decision': status})
-
-          .eq('id', reportId);
-
-
-
-      if (mounted) {
-
-        Navigator.pop(context); // Close the popup window
-
-        ScaffoldMessenger.of(context).showSnackBar(
-
-          SnackBar(
-
-            content: Text("Road status updated to $status."),
-
-            backgroundColor: status == 'Impassable' ? Colors.red : Colors.orange,
-
-          ),
-
-        );
-
-      }
-
-    } catch (e) {
-
-      debugPrint("Error updating road status: $e");
-
-    }
-
+  double _safeDouble(dynamic value, {double defaultValue = 0.0}) {
+    if (value == null) return defaultValue;
+    if (value is num) return value.toDouble();
+    if (value is String) return double.tryParse(value) ?? defaultValue;
+    return defaultValue;
   }
 
-
-
-  // --- POP-UP: DYNAMIC WINDOW ---
-
-  void _openReportWindow(Map<String, dynamic> data, bool isUserReport) {
-
-    showDialog(
-
-      context: context,
-
-      builder: (context) => AlertDialog(
-
-        contentPadding: EdgeInsets.zero,
-
-        backgroundColor: Colors.white,
-
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-
-        content: SizedBox(
-
-          width: 500,
-
-          child: Column(
-
-            mainAxisSize: MainAxisSize.min,
-
-            children: [
-
-              _buildPopupHeader(data),
-
-              Padding(
-
-                padding: const EdgeInsets.all(20),
-
-                child: Column(
-
-                  crossAxisAlignment: CrossAxisAlignment.start,
-
-                  children: [
-
-                    if (isUserReport) ...[
-
-                      _buildInfoRow(Icons.person, "User Comments", data['user_comments'] ?? "No comment provided."),
-
-                      const SizedBox(height: 12),
-
-                      _buildInfoRow(Icons.gavel, "Current Decision", data['admin_decision'] ?? "Pending",
-
-                        color: _getDecisionColor(data['admin_decision'])),
-
-                      const SizedBox(height: 12),
-
-                      const Divider(),
-
-                      const Text("ADMIN COMMAND CENTER", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueGrey, fontSize: 11)),
-
-                      const SizedBox(height: 12),
-
-                      Row(
-
-                        children: [
-
-                          _actionButton("SET RISKY", Colors.orange, () => _updateRoadStatus(data['id'], "Risky")),
-
-                          const SizedBox(width: 10),
-
-                          _actionButton("SET IMPASSABLE", Colors.red, () => _updateRoadStatus(data['id'], "Impassable")),
-
-                        ],
-
-                      ),
-
-                    ] else ...[
-
-                      Row(
-
-                        children: [
-
-                          _detailStat("WATER LEVEL", "${data['water_level_ft']} ft", Icons.water_drop),
-
-                          const SizedBox(width: 16),
-
-                          _detailStat("STATUS", data['status'], Icons.info_outline),
-
-                        ],
-
-                      ),
-
-                    ],
-
-                  ],
-
-                ),
-
-              ),
-
-            ],
-
-          ),
-
-        ),
-
-      ),
-
-    );
-
+  String _calculateStatus(double cm) {
+    if (cm <= 15) return 'Normal';
+    if (cm > 15 && cm <= 30) return 'Risky';
+    return 'Impassable';
   }
 
-
+  Color _getStatusColor(String status) {
+    if (status == 'Impassable' || status == 'Critical') return Colors.red;
+    if (status == 'Risky' || status == 'Warning') return Colors.orange;
+    return Colors.green;
+  }
 
   Color _getDecisionColor(String? decision) {
-
     switch (decision) {
-
       case 'Impassable': return Colors.red;
-
       case 'Risky': return Colors.orange;
-
       default: return Colors.blue;
-
     }
-
   }
 
+  void _showAdminActionDialog(Map<String, dynamic> report) {
+    setState(() { _selectedNode = report; });
 
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text("Verify Report", style: TextStyle(fontWeight: FontWeight.bold)),
+            IconButton(
+              icon: const Icon(Icons.delete_forever, color: Colors.red),
+              onPressed: () => _deleteReport(report['id']), 
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(report['location_name'] ?? "Unknown Location"),
+            const SizedBox(height: 12),
+            if (report['image_url'] != null && report['image_url'].toString().isNotEmpty)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.network(report['image_url'], height: 150, width: double.infinity, fit: BoxFit.cover),
+              )
+            else
+              Container(
+                height: 100, width: double.infinity,
+                decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(8)),
+                child: const Center(child: Icon(Icons.image_not_supported)),
+              ),
+            const SizedBox(height: 16),
+            const Text("Set Decision:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+            onPressed: () => _updateReportStatus(report['id'], 'Risky'),
+            child: const Text("Risky"),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => _updateReportStatus(report['id'], 'Impassable'),
+            child: const Text("Impassable"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _updateReportStatus(dynamic reportId, String decision) async {
+    try {
+      await Supabase.instance.client.from('user_reports').update({'admin_decision': decision}).eq('id', reportId);
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) { debugPrint("Update error: $e"); }
+  }
+
+  Future<void> _deleteReport(dynamic reportId) async {
+    try {
+      await Supabase.instance.client.from('user_reports').delete().match({'id': reportId});
+      if (!mounted) return;
+      Navigator.pop(context);
+      setState(() { _selectedNode = null; });
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Deleted"), backgroundColor: Colors.black));
+    } catch (e) { debugPrint("Delete error: $e"); }
+  }
+
+  void _onNodeSelected(Map<String, dynamic> node) {
+    setState(() {
+      // Importante: I-keep ang coordinates kung ang gi-click kay history log
+      double lat = _safeDouble(node['latitude']);
+      double lng = _safeDouble(node['longitude']);
+
+      if (lat == 0.0 && _selectedNode != null) {
+        lat = _safeDouble(_selectedNode!['latitude']);
+        lng = _safeDouble(_selectedNode!['longitude']);
+      }
+
+      _selectedNode = {
+        ...node,
+        'latitude': lat > 0 ? lat : 10.2644,
+        'longitude': lng > 0 ? lng : 123.8503,
+      };
+    });
+    
+    _mapController.move(LatLng(_safeDouble(_selectedNode!['latitude']), _safeDouble(_selectedNode!['longitude'])), 14.5);
+  }
 
   @override
-
   Widget build(BuildContext context) {
-
     return Row(
-
       children: [
-
-        // --- SIDEBAR ---
-
         Container(
-
           width: 350,
-
           color: Colors.white,
-
           child: Column(
-
             children: [
-
               _buildSidebarHeaderWidget(),
-
               Expanded(
-
                 child: StreamBuilder<List<Map<String, dynamic>>>(
-
-                  // Listening to sensors
-
-                  stream: Supabase.instance.client.from('sensors').stream(primaryKey: ['id']),
-
+                  stream: Supabase.instance.client.from('sensor_logs').stream(primaryKey: ['id']).order('recorded_at', ascending: false),
                   builder: (context, sensorSnapshot) {
-
                     return StreamBuilder<List<Map<String, dynamic>>>(
-
-                      // REAL-TIME: This stream detects the 'update' from _updateRoadStatus
-
                       stream: Supabase.instance.client.from('user_reports').stream(primaryKey: ['id']),
-
                       builder: (context, reportSnapshot) {
-
-                        final sensors = sensorSnapshot.data ?? [];
-
+                        final sensors = _getUniqueSensors(sensorSnapshot.data ?? []);
                         final reports = reportSnapshot.data ?? [];
-
-
-
                         return ListView(
-
                           children: [
-
-                            const _SectionHeader("LIVE SENSOR NODES"),
-
+                            const _SectionHeader(title: "LIVE SENSOR NODES"),
                             ...sensors.map((s) => _buildListTile(s, false)),
-
-                            const Divider(),
-
-                            const _SectionHeader("COMMUTER REPORTS"),
-
+                            if (_selectedNode != null && _selectedNode!.containsKey('sensor_id')) ...[
+                              const Divider(thickness: 2, height: 32),
+                              _buildNodeInfoTile(),
+                              _buildNodeHistoryList(_selectedNode!['sensor_id'].toString()),
+                            ],
+                            const Divider(height: 32),
+                            const _SectionHeader(title: "COMMUTER REPORTS"),
                             ...reports.map((r) => _buildListTile(r, true)),
-
                           ],
-
                         );
-
                       },
-
                     );
-
                   },
-
                 ),
-
               ),
-
             ],
-
           ),
-
         ),
-
-        // --- LIVE MAP ---
-
         Expanded(
-
           child: StreamBuilder<List<Map<String, dynamic>>>(
-
-            stream: Supabase.instance.client.from('sensors').stream(primaryKey: ['id']),
-
+            stream: Supabase.instance.client.from('sensor_logs').stream(primaryKey: ['id']).order('recorded_at', ascending: false),
             builder: (context, sensorSnapshot) {
-
               return StreamBuilder<List<Map<String, dynamic>>>(
-
                 stream: Supabase.instance.client.from('user_reports').stream(primaryKey: ['id']),
-
                 builder: (context, reportSnapshot) {
-
-                  final sensors = sensorSnapshot.data ?? [];
-
-                  final reports = reportSnapshot.data ?? [];
-
-
+                  final sensors = _getUniqueSensors(sensorSnapshot.data ?? []);
+                  final userReports = reportSnapshot.data ?? [];
 
                   return FlutterMap(
-
+                    mapController: _mapController,
                     options: const MapOptions(initialCenter: LatLng(10.2644, 123.8503), initialZoom: 14),
-
                     children: [
-
                       TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'),
-
-                      MarkerLayer(
-
-                        markers: [
-
-                          ...sensors.map((s) => _buildMarker(s, false)),
-
-                          // Map markers will automatically change color based on the stream data
-
-                          ...reports.map((r) => _buildMarker(r, true)),
-
+                      
+                      CircleLayer(
+                        circles: [
+                          if (_selectedNode != null)
+                            CircleMarker(
+                              point: LatLng(_safeDouble(_selectedNode!['latitude']), _safeDouble(_selectedNode!['longitude'])),
+                              radius: 600, useRadiusInMeter: true,
+                              color: _getStatusColor(_selectedNode!.containsKey('sensor_id') 
+                                ? _calculateStatus(_safeDouble(_selectedNode!['water_level_cm'])) 
+                                : (_selectedNode!['admin_decision'] == 'Impassable' ? 'Impassable' : (_selectedNode!['admin_decision'] == 'Risky' ? 'Risky' : 'Normal'))).withAlpha(40),
+                              borderColor: _getStatusColor(_selectedNode!.containsKey('sensor_id') 
+                                ? _calculateStatus(_safeDouble(_selectedNode!['water_level_cm'])) 
+                                : (_selectedNode!['admin_decision'] == 'Impassable' ? 'Impassable' : (_selectedNode!['admin_decision'] == 'Risky' ? 'Risky' : 'Normal'))), 
+                              borderStrokeWidth: 3,
+                            ),
                         ],
-
                       ),
 
+                      MarkerLayer(
+                        markers: [
+                          ...sensors.map((s) => _buildMarker(s, false)),
+                          ...userReports.map((r) => _buildMarker(r, true)),
+                        ],
+                      ),
                     ],
-
                   );
-
                 },
-
               );
-
             },
-
           ),
-
         ),
-
       ],
-
     );
-
   }
-
-
-
-  // --- UI COMPONENTS ---
-
-
-
-  Widget _buildPopupHeader(Map<String, dynamic> data) {
-
-    String? imageUrl = data['image_url'];
-
-    return Stack(
-
-      children: [
-
-        Container(
-
-          height: 200, width: double.infinity,
-
-          decoration: const BoxDecoration(
-
-            color: Color(0xFF1B2430),
-
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20))
-
-          ),
-
-          child: imageUrl != null
-
-            ? ClipRRect(
-
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-
-                child: Image.network(imageUrl, fit: BoxFit.cover),
-
-              )
-
-            : const Icon(Icons.image_outlined, size: 50, color: Colors.white24),
-
-        ),
-
-        Positioned(
-
-          bottom: 15, left: 20,
-
-          child: Text(data['location_name'] ?? "Report Detail",
-
-            style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold, shadows: [Shadow(blurRadius: 8, color: Colors.black)])),
-
-        ),
-
-        Positioned(top: 10, right: 10, child: IconButton(icon: const Icon(Icons.close, color: Colors.white), onPressed: () => Navigator.pop(context))),
-
-      ],
-
-    );
-
-  }
-
-
 
   Widget _buildListTile(Map<String, dynamic> data, bool isUser) {
-
-    // These evaluate every time the StreamBuilder receives new data
-
-    Color iconColor = isUser
-
-      ? _getDecisionColor(data['admin_decision'])
-
-      : (data['status'] == 'Critical' ? Colors.red : Colors.blue);
-
-
+    bool isSelected = _selectedNode?['id'] == data['id'];
+    double cm = _safeDouble(data['water_level_cm']);
+    Color iconColor = isUser ? _getDecisionColor(data['admin_decision']) : _getStatusColor(_calculateStatus(cm));
 
     return ListTile(
-
+      selected: isSelected,
+      selectedTileColor: Colors.blue.withAlpha(12),
       leading: Icon(isUser ? Icons.report_problem : Icons.sensors, color: iconColor),
-
-      title: Text(data['location_name'] ?? "Unknown", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-
-      subtitle: Text(isUser
-
-        ? "Status: ${data['admin_decision'] ?? 'Pending'}"
-
-        : "Depth: ${data['water_level_ft']} ft", style: const TextStyle(fontSize: 11)),
-
-      onTap: () => _openReportWindow(data, isUser),
-
+      title: Text(data['location_name'] ?? "Unknown", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+      subtitle: Text(isUser ? "Decision: ${data['admin_decision'] ?? 'Pending'}" : "# ${data['sensor_id']}"),
+      onTap: () => isUser ? _showAdminActionDialog(data) : _onNodeSelected(data),
     );
-
   }
-
-
 
   Marker _buildMarker(Map<String, dynamic> data, bool isUser) {
-
-    Color markerColor = isUser
-
-      ? _getDecisionColor(data['admin_decision'])
-
-      : (data['status'] == 'Critical' ? Colors.red : Colors.blue);
-
-
-
-    LatLng position = LatLng(
-
-      data['latitude'] ?? 10.2644,
-
-      data['longitude'] ?? 123.8503
-
-    );
-
-
-
+    double cm = _safeDouble(data['water_level_cm']);
+    Color markerColor = isUser ? _getDecisionColor(data['admin_decision']) : _getStatusColor(_calculateStatus(cm));
     return Marker(
-
-      point: position, width: 60, height: 60,
-
+      point: LatLng(_safeDouble(data['latitude']), _safeDouble(data['longitude'])),
+      width: 50, height: 50,
       child: GestureDetector(
-
-        onTap: () => _openReportWindow(data, isUser),
-
-        child: Icon(isUser ? Icons.warning : Icons.location_on, color: markerColor, size: 40),
-
+        onTap: () => isUser ? _showAdminActionDialog(data) : _onNodeSelected(data),
+        child: Icon(isUser ? Icons.warning : Icons.location_on, color: markerColor, size: 35),
       ),
-
     );
-
   }
 
+  List<Map<String, dynamic>> _getUniqueSensors(List<Map<String, dynamic>> logs) {
+    final Map<String, Map<String, dynamic>> unique = {};
+    for (var s in logs) { if (!unique.containsKey(s['sensor_id'])) unique[s['sensor_id']] = s; }
+    return unique.values.toList();
+  }
 
+  Widget _buildNodeInfoTile() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8.0),
+      child: ListTile(
+        dense: true,
+        title: Text("SENSING: ${_selectedNode!['location_name'] ?? 'UNKNOWN'}".toUpperCase(), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.blueGrey)),
+        trailing: IconButton(icon: const Icon(Icons.close, size: 16), onPressed: () => setState(() => _selectedNode = null)),
+      ),
+    );
+  }
+
+  Widget _buildNodeHistoryList(String sensorId) {
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: Supabase.instance.client.from('sensor_logs').select().eq('sensor_id', sensorId).order('recorded_at', ascending: false).limit(10),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const LinearProgressIndicator();
+        return ListView.builder(
+          shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
+          itemCount: snapshot.data!.length,
+          itemBuilder: (context, i) {
+            final item = snapshot.data![i];
+            double cm = _safeDouble(item['water_level_cm']);
+            String status = _calculateStatus(cm);
+            bool isCurrentSelected = _selectedNode?['id'] == item['id'];
+
+            return ListTile(
+              dense: true,
+              selected: isCurrentSelected,
+              selectedTileColor: _getStatusColor(status).withAlpha(10),
+              onTap: () => _onNodeSelected(item), 
+              title: Text("$cm cm", style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text(item['recorded_at'].toString().substring(11, 16)),
+              trailing: _buildStatusBadge(status),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildStatusBadge(String status) {
+    Color color = _getStatusColor(status);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(color: color.withAlpha(25), borderRadius: BorderRadius.circular(4)),
+      child: Text(status.toUpperCase(), style: TextStyle(color: color, fontSize: 8, fontWeight: FontWeight.bold)),
+    );
+  }
 
   Widget _buildSidebarHeaderWidget() {
-
     return Padding(
-
       padding: const EdgeInsets.all(24),
-
       child: Column(
-
         crossAxisAlignment: CrossAxisAlignment.start,
-
         children: [
-
           const Text("Monitoring Center", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-
           const SizedBox(height: 16),
-
           TextField(
-
             controller: _searchController,
-
-            decoration: InputDecoration(hintText: "Search streets...", prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)), contentPadding: EdgeInsets.zero),
-
+            decoration: InputDecoration(hintText: "Search locations...", prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)), contentPadding: EdgeInsets.zero),
           ),
-
         ],
-
       ),
-
     );
-
   }
-
-
-
-  Widget _buildInfoRow(IconData icon, String label, String value, {Color color = Colors.black}) {
-
-    return Row(
-
-      children: [
-
-        Icon(icon, size: 16, color: Colors.grey),
-
-        const SizedBox(width: 8),
-
-        Text("$label: ", style: const TextStyle(color: Colors.grey, fontSize: 13)),
-
-        Expanded(child: Text(value, style: TextStyle(fontWeight: FontWeight.bold, color: color, fontSize: 13))),
-
-      ],
-
-    );
-
-  }
-
-
-
-  Widget _actionButton(String label, Color color, VoidCallback onPressed) {
-
-    return Expanded(
-
-      child: ElevatedButton(
-
-        style: ElevatedButton.styleFrom(backgroundColor: color, foregroundColor: Colors.white, elevation: 0),
-
-        onPressed: onPressed,
-
-        child: Text(label, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
-
-      ),
-
-    );
-
-  }
-
-
-
-  Widget _detailStat(String label, String value, IconData icon) {
-
-    return Expanded(
-
-      child: Container(
-
-        padding: const EdgeInsets.all(12),
-
-        decoration: BoxDecoration(color: const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
-
-        child: Column(
-
-          crossAxisAlignment: CrossAxisAlignment.start,
-
-          children: [
-
-            Row(children: [Icon(icon, size: 12, color: Colors.blue), const SizedBox(width: 4), Text(label, style: const TextStyle(fontSize: 10, color: Colors.blue, fontWeight: FontWeight.bold))]),
-
-            const SizedBox(height: 4),
-
-            Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-
-          ],
-
-        ),
-
-      ),
-
-    );
-
-  }
-
 }
-
-
 
 class _SectionHeader extends StatelessWidget {
-
   final String title;
-
-  const _SectionHeader(this.title);
-
+  const _SectionHeader({required this.title});
   @override
-
   Widget build(BuildContext context) {
-
     return Padding(padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10), child: Text(title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey)));
-
   }
-
 }
-

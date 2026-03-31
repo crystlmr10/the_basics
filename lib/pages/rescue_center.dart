@@ -52,14 +52,14 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
     RescueIncident(
       id: 'INC-001',
       userName: 'Ana Quisumbing',
-      userPos: LatLng(10.2608, 123.8215),
+      userPos: const LatLng(10.2608, 123.8215),
       depthLabel: 'Low',
       reportedAt: DateTime(2026, 1, 4, 5, 39),
     ),
     RescueIncident(
       id: 'INC-002',
       userName: 'Maria Fernandez',
-      userPos: LatLng(10.2605, 123.8420),
+      userPos: const LatLng(10.2605, 123.8420),
       depthLabel: 'High',
       reportedAt: DateTime(2026, 1, 4, 5, 39),
     ),
@@ -70,14 +70,14 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
       id: 'RES-001',
       name: 'Rescuer A',
       status: RescuerStatus.available,
-      pos: LatLng(10.2620, 123.8410),
+      pos: const LatLng(10.2620, 123.8410),
       lastSeen: DateTime(2026, 1, 4, 5, 38),
     ),
     Rescuer(
       id: 'RES-002',
       name: 'Rescuer B',
       status: RescuerStatus.available,
-      pos: LatLng(10.2690, 123.8540),
+      pos: const LatLng(10.2690, 123.8540),
       lastSeen: DateTime(2026, 1, 4, 5, 37),
     ),
   ];
@@ -99,7 +99,7 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
       padding: const EdgeInsets.all(24),
       child: Column(
         children: [
-          _TopTitle(
+          const _TopTitle(
             title: 'Rescue Center',
             subtitle: 'Command and dispatch community help requests',
           ),
@@ -224,7 +224,7 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
                                       point: r.pos,
                                       width: 42,
                                       height: 42,
-                                      child: Icon(Icons.location_on, color: Colors.blueAccent, size: 34),
+                                      child: const Icon(Icons.location_on, color: Colors.blueAccent, size: 34),
                                     )),
                               ],
                             ),

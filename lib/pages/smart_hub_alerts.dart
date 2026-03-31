@@ -764,7 +764,7 @@ class _ManualCreatorCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final locations = const <MapEntry<String, String>>[
+    const locations = <MapEntry<String, String>>[
       MapEntry('linao_talisay', 'Linao Talisay'),
       MapEntry('tabunok_talisay', 'Tabunok Talisay'),
       MapEntry('bulacao', 'Bulacao'),
