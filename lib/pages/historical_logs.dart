@@ -20,8 +20,10 @@ class HistoricalLogRow {
   factory HistoricalLogRow.fromMap(Map<String, dynamic> map) {
     return HistoricalLogRow(
       id: map['id']?.toString() ?? '',
-      ts: DateTime.tryParse(map['recorded_at'] ?? '') ?? DateTime.now(),
-      location: map['location_name'] ?? 'Unknown Location',
+      // Maps the "created_at" or "recorded_at" timestamp from your table
+      ts: DateTime.tryParse(map['created_at'] ?? '') ?? DateTime.now(),
+      // Uses "sensor_id" to represent the location, as seen in the screenshot
+      location: map['sensor_id']?.toString() ?? 'Unknown Location',
       waterLevelCm: (map['water_level_cm'] as num? ?? 0.0).toDouble(),
     );
   }
@@ -42,16 +44,16 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
 
   DateTimeRange? _range;
   String _locationFilter = 'All';
-  String _chartLocation = 'Tabunok, Talisay';
+  String _chartLocation = 'LORA-TABUNOK';
 
   @override
   void initState() {
     super.initState();
-    // Initialize real-time Supabase stream
+    // Initialize real-time Supabase stream pointing to the "sensor_logs" table
     _logsStream = Supabase.instance.client
         .from('sensor_logs')
         .stream(primaryKey: ['id'])
-        .order('recorded_at')
+        .order('created_at', ascending: false)
         .map((data) => data.map((map) => HistoricalLogRow.fromMap(map)).toList());
   }
 
@@ -63,9 +65,7 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
 
   List<String> get _locations => const [
         'All',
-        'Tabunok, Talisay',
-        'Linao, Talisay',
-        'Bulacao Pardo',
+        'LORA-TABUNOC',
       ];
 
   @override
@@ -81,14 +81,15 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
           return const Center(child: CircularProgressIndicator());
         }
 
-        // Use mock curve data only if database is empty for visual testing
         final allData = (snapshot.data == null || snapshot.data!.isEmpty)
             ? _seedCurvedMockData()
             : snapshot.data!;
 
         final filtered = _applyFilters(allData);
-        final chartRows = filtered.where((r) => r.location == _chartLocation).toList()
-          ..sort((a, b) => a.ts.compareTo(b.ts));
+        final chartRows = filtered
+            .where((r) => r.location == _chartLocation)
+            .toList()
+            ..sort((a, b) => a.ts.compareTo(b.ts));
 
         return Padding(
           padding: const EdgeInsets.all(24),
@@ -96,7 +97,6 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // 1. TOP SECTION: FILTERS
                 _FiltersCard(
                   locations: _locations,
                   selectedLocation: _locationFilter,
@@ -107,8 +107,6 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
                   onSearchChanged: (_) => setState(() {}),
                 ),
                 const SizedBox(height: 24),
-
-                // 2. MIDDLE SECTION: Side-by-side (Table | Sidebar)
                 if (isWide)
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -132,12 +130,9 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
                       _RecentEventsSidebar(rows: filtered),
                     ],
                   ),
-
                 const SizedBox(height: 24),
-
-                // 3. BOTTOM SECTION: ANALYTICS CHART (Full Width)
                 SizedBox(
-                  height: 450, // Specific height to handle hit-testing correctly
+                  height: 450,
                   child: _TrendCard(
                     scheme: scheme,
                     chartLocations: _locations.where((l) => l != 'All').toList(),
@@ -158,13 +153,21 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
   List<HistoricalLogRow> _applyFilters(List<HistoricalLogRow> rows) {
     final q = _searchCtrl.text.trim().toLowerCase();
     return rows.where((row) {
-      if (_locationFilter != 'All' && row.location != _locationFilter) return false;
-      if (_range != null) {
-        if (row.ts.isBefore(_range!.start) || row.ts.isAfter(_range!.end.add(const Duration(days: 1)))) return false;
+      if (_locationFilter != 'All' && row.location != _locationFilter) {
+        return false;
       }
-      if (q.isNotEmpty && !row.location.toLowerCase().contains(q)) return false;
+      if (_range != null) {
+        if (row.ts.isBefore(_range!.start) ||
+            row.ts.isAfter(_range!.end.add(const Duration(days: 1)))) {
+          return false;
+        }
+      }
+      if (q.isNotEmpty && !row.location.toLowerCase().contains(q)) {
+        return false;
+      }
       return true;
-    }).toList()..sort((a, b) => b.ts.compareTo(a.ts));
+    }).toList()
+      ..sort((a, b) => b.ts.compareTo(a.ts));
   }
 
   Future<void> _pickRange() async {
@@ -179,7 +182,7 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
 
   static FloodLabel _labelFor(double cm) {
     if (cm < 15) return FloodLabel.normal;
-    if (cm <= 30) return FloodLabel.lowFlood;
+    if (cm <= 50) return FloodLabel.lowFlood;
     return FloodLabel.deepFlood;
   }
 
@@ -190,15 +193,18 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
 
   static List<HistoricalLogRow> _seedCurvedMockData() {
     final now = DateTime.now();
-    final locations = <String>['Tabunok, Talisay', 'Linao, Talisay', 'Bulacao Pardo'];
+    final locations = <String>['LORA-TABUNOK'];
     final rows = <HistoricalLogRow>[];
     for (final loc in locations) {
-      final baseOffset = switch (loc) { 'Tabunok, Talisay' => 0.0, 'Linao, Talisay' => 5.0, _ => 10.0 };
       for (int i = 0; i < 24; i++) {
         final ts = now.subtract(Duration(hours: 23 - i));
         final angle = (i / 24.0) * 2 * pi;
-        final cm = 15.0 + (10.0 * sin(angle - (pi / 2))) + baseOffset;
-        rows.add(HistoricalLogRow(id: 'MOCK-$i', ts: ts, location: loc, waterLevelCm: cm.clamp(2.0, 45.0)));
+        final cm = 15.0 + (10.0 * sin(angle - (pi / 2)));
+        rows.add(HistoricalLogRow(
+            id: 'MOCK-$i',
+            ts: ts,
+            location: loc,
+            waterLevelCm: cm.clamp(2.0, 95.0)));
       }
     }
     return rows;
@@ -221,9 +227,15 @@ class _TableCardState extends State<_TableCard> {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(16),
         child: Theme(
-          data: Theme.of(context).copyWith(dividerColor: Colors.black.withValues(alpha: 0.06)),
+          data: Theme.of(context)
+              .copyWith(dividerColor: Colors.black.withValues(alpha: 0.06)),
           child: PaginatedDataTable(
-            header: const Row(children: [Icon(Icons.table_chart_outlined, size: 18), SizedBox(width: 10), Text('Data Logs', style: TextStyle(fontWeight: FontWeight.w900))]),
+            header: const Row(children: [
+              Icon(Icons.table_chart_outlined, size: 18),
+              SizedBox(width: 10),
+              Text('Data Logs',
+                  style: TextStyle(fontWeight: FontWeight.w900))
+            ]),
             columns: const [
               DataColumn(label: Text('Time & Date')),
               DataColumn(label: Text('Location')),
@@ -249,13 +261,25 @@ class _TrendCard extends StatelessWidget {
   final ValueChanged<String> onChartLocationChanged;
   final List<HistoricalLogRow> chartRows;
 
-  const _TrendCard({required this.scheme, required this.chartLocations, required this.chartLocation, required this.onChartLocationChanged, required this.chartRows});
+  const _TrendCard(
+      {required this.scheme,
+      required this.chartLocations,
+      required this.chartLocation,
+      required this.onChartLocationChanged,
+      required this.chartRows});
 
   @override
   Widget build(BuildContext context) {
     const Color primaryBlack = Color(0xFF1A1A1B);
-    final spots = chartRows.asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value.waterLevelCm)).toList();
-    final maxY = (chartRows.isEmpty ? 50.0 : chartRows.map((e) => e.waterLevelCm).reduce((a, b) => a > b ? a : b)) + 10;
+    final spots = chartRows
+        .asMap()
+        .entries
+        .map((e) => FlSpot(e.key.toDouble(), e.value.waterLevelCm))
+        .toList();
+    final maxY = (chartRows.isEmpty
+            ? 100.0
+            : chartRows.map((e) => e.waterLevelCm).reduce((a, b) => a > b ? a : b)) +
+        10;
 
     return _CardShell(
       child: Padding(
@@ -263,46 +287,74 @@ class _TrendCard extends StatelessWidget {
         child: Column(
           children: [
             Row(children: [
-              const _CardTitle(icon: Icons.show_chart, title: 'Water Level Trend Analysis'),
+              const _CardTitle(
+                  icon: Icons.show_chart,
+                  title: 'Water Level Trend Analysis'),
               const Spacer(),
-              _LocationDropdown(label: 'Select Location', value: chartLocation, locations: chartLocations, onChanged: onChartLocationChanged, compact: true)
+              _LocationDropdown(
+                  label: 'Select Location',
+                  value: chartLocation,
+                  locations: chartLocations,
+                  onChanged: onChartLocationChanged,
+                  compact: true)
             ]),
             const SizedBox(height: 32),
             Expanded(
               child: chartRows.isEmpty
-                  ? const Center(child: Text('No historical data available for this selection.'))
+                  ? const Center(
+                      child: Text(
+                          'No historical data available for this selection.'))
                   : LineChart(LineChartData(
                       minY: 0,
                       maxY: maxY,
                       gridData: FlGridData(
                         show: true,
                         drawVerticalLine: true,
-                        horizontalInterval: 10,
+                        horizontalInterval: 20,
                         verticalInterval: 1,
-                        getDrawingHorizontalLine: (value) => FlLine(color: Colors.black.withValues(alpha: 0.05), strokeWidth: 1),
-                        getDrawingVerticalLine: (value) => FlLine(color: Colors.black.withValues(alpha: 0.05), strokeWidth: 1),
+                        getDrawingHorizontalLine: (value) => FlLine(
+                            color: Colors.black.withValues(alpha: 0.05),
+                            strokeWidth: 1),
+                        getDrawingVerticalLine: (value) => FlLine(
+                            color: Colors.black.withValues(alpha: 0.05),
+                            strokeWidth: 1),
                       ),
-                      borderData: FlBorderData(show: true, border: Border.all(color: Colors.black.withValues(alpha: 0.05))),
+                      borderData: FlBorderData(
+                          show: true,
+                          border: Border.all(
+                              color: Colors.black.withValues(alpha: 0.05))),
                       titlesData: FlTitlesData(
-                        topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                        rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                        topTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false)),
+                        rightTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false)),
                         leftTitles: AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
                             reservedSize: 45,
-                            interval: 10,
-                            getTitlesWidget: (v, meta) => Text('${v.toInt()}cm', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
+                            interval: 20,
+                            getTitlesWidget: (v, meta) => Text('${v.toInt()}cm',
+                                style: const TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.grey)),
                           ),
                         ),
                         bottomTitles: AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
-                            interval: (chartRows.length / 6).clamp(1, 999).toDouble(),
+                            interval: (chartRows.length / 6)
+                                .clamp(1, 999)
+                                .toDouble(),
                             getTitlesWidget: (v, meta) {
-                              final idx = v.round().clamp(0, chartRows.length - 1);
+                              final idx = v
+                                  .round()
+                                  .clamp(0, chartRows.length - 1);
                               return Padding(
                                 padding: const EdgeInsets.only(top: 8.0),
-                                child: Text('${chartRows[idx].ts.hour}:00', style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                                child: Text('${chartRows[idx].ts.hour}:00',
+                                    style: const TextStyle(
+                                        fontSize: 10, color: Colors.grey)),
                               );
                             },
                           ),
@@ -321,7 +373,10 @@ class _TrendCard extends StatelessWidget {
                             gradient: LinearGradient(
                               begin: Alignment.topCenter,
                               end: Alignment.bottomCenter,
-                              colors: [primaryBlack.withValues(alpha: 0.12), Colors.transparent],
+                              colors: [
+                                primaryBlack.withValues(alpha: 0.12),
+                                Colors.transparent
+                              ],
                             ),
                           ),
                         )
@@ -329,8 +384,13 @@ class _TrendCard extends StatelessWidget {
                       lineTouchData: LineTouchData(
                         touchTooltipData: LineTouchTooltipData(
                           tooltipRoundedRadius: 8,
-                          getTooltipItems: (touchedSpots) => touchedSpots.map((s) {
-                            return LineTooltipItem('${s.y.toInt()} cm', const TextStyle(color: Colors.white, fontWeight: FontWeight.bold));
+                          getTooltipItems: (touchedSpots) => touchedSpots
+                              .map((s) {
+                            return LineTooltipItem(
+                                '${s.y.toInt()} cm',
+                                const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold));
                           }).toList(),
                         ),
                       ),
@@ -349,21 +409,31 @@ class _RecentEventsSidebar extends StatelessWidget {
   const _RecentEventsSidebar({required this.rows});
   @override
   Widget build(BuildContext context) {
-    final critical = rows.where((r) => _HistoricalLogsPageState._labelFor(r.waterLevelCm) == FloodLabel.deepFlood).take(8).toList();
+    final critical = rows
+        .where((r) =>
+            _HistoricalLogsPageState._labelFor(r.waterLevelCm) ==
+            FloodLabel.deepFlood)
+        .take(8)
+        .toList();
     return _CardShell(
       child: Padding(
         padding: const EdgeInsets.all(18),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const _CardTitle(icon: Icons.notifications_active_outlined, title: 'Critical Logs'),
+            const _CardTitle(
+                icon: Icons.notifications_active_outlined,
+                title: 'Critical Logs'),
             const SizedBox(height: 12),
             ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 460),
               child: critical.isEmpty
                   ? const Padding(
                       padding: EdgeInsets.symmetric(vertical: 40),
-                      child: Center(child: Text('No danger levels detected.', style: TextStyle(color: Colors.grey, fontSize: 12))),
+                      child: Center(
+                          child: Text('No danger levels detected.',
+                              style:
+                                  TextStyle(color: Colors.grey, fontSize: 12))),
                     )
                   : ListView.separated(
                       shrinkWrap: true,
@@ -373,9 +443,14 @@ class _RecentEventsSidebar extends StatelessWidget {
                       itemBuilder: (context, i) {
                         return ListTile(
                           contentPadding: EdgeInsets.zero,
-                          leading: const Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
-                          title: Text(critical[i].location, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                          subtitle: Text('${critical[i].waterLevelCm.toInt()}cm at ${_HistoricalLogsPageState._formatTs(critical[i].ts)}', style: const TextStyle(fontSize: 11)),
+                          leading: const Icon(Icons.warning_amber_rounded,
+                              color: Colors.redAccent),
+                          title: Text(critical[i].location,
+                              style: const TextStyle(
+                                  fontSize: 12, fontWeight: FontWeight.bold)),
+                          subtitle: Text(
+                              '${critical[i].waterLevelCm.toInt()}cm at ${_HistoricalLogsPageState._formatTs(critical[i].ts)}',
+                              style: const TextStyle(fontSize: 11)),
                         );
                       }),
             ),
@@ -392,17 +467,41 @@ class _LocationDropdown extends StatelessWidget {
   final List<String> locations;
   final ValueChanged<String> onChanged;
   final bool compact;
-  const _LocationDropdown({required this.label, required this.value, required this.locations, required this.onChanged, this.compact = false});
+
+  const _LocationDropdown({
+    required this.label,
+    required this.value,
+    required this.locations,
+    required this.onChanged,
+    this.compact = false,
+  });
+
   @override
-  Widget build(BuildContext context) => SizedBox(
+  Widget build(BuildContext context) {
+    // 1. Remove duplicate items using toSet()
+    final distinctItems = locations.toSet().toList();
+
+    return SizedBox(
       width: 260,
       height: compact ? 44 : null,
       child: DropdownButtonFormField<String>(
-          key: ValueKey(value),
-          initialValue: value,
-          items: locations.map((l) => DropdownMenuItem(value: l, child: Text(l, overflow: TextOverflow.ellipsis))).toList(),
-          onChanged: (v) => v != null ? onChanged(v) : null,
-          decoration: InputDecoration(labelText: label, border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)), isDense: true)));
+        key: ValueKey(value),
+        initialValue: distinctItems.contains(value) ? value : null,
+        items: distinctItems
+            .map((l) => DropdownMenuItem(
+                  value: l,
+                  child: Text(l, overflow: TextOverflow.ellipsis),
+                ))
+            .toList(),
+        onChanged: (v) => v != null ? onChanged(v) : null,
+        decoration: InputDecoration(
+          labelText: label,
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          isDense: true,
+        ),
+      ),
+    );
+  }
 }
 
 class _LogsTableSource extends DataTableSource {
@@ -413,15 +512,22 @@ class _LogsTableSource extends DataTableSource {
     if (index >= rows.length) return null;
     final r = rows[index];
     return DataRow.byIndex(index: index, cells: [
-      DataCell(Text(_HistoricalLogsPageState._formatTs(r.ts), style: const TextStyle(fontWeight: FontWeight.bold))),
+      DataCell(Text(_HistoricalLogsPageState._formatTs(r.ts),
+          style: const TextStyle(fontWeight: FontWeight.bold))),
       DataCell(Text(r.location)),
-      DataCell(Text('${r.waterLevelCm.toInt()} cm', style: const TextStyle(fontWeight: FontWeight.bold))),
-      DataCell(_FloodBadge(label: _HistoricalLogsPageState._labelFor(r.waterLevelCm)))
+      DataCell(Text('${r.waterLevelCm.toInt()} cm',
+          style: const TextStyle(fontWeight: FontWeight.bold))),
+      DataCell(_FloodBadge(
+          label: _HistoricalLogsPageState._labelFor(r.waterLevelCm)))
     ]);
   }
-  @override bool get isRowCountApproximate => false;
-  @override int get rowCount => rows.length;
-  @override int get selectedRowCount => 0;
+
+  @override
+  bool get isRowCountApproximate => false;
+  @override
+  int get rowCount => rows.length;
+  @override
+  int get selectedRowCount => 0;
 }
 
 class _FloodBadge extends StatelessWidget {
@@ -432,12 +538,15 @@ class _FloodBadge extends StatelessWidget {
     final (text, bg) = switch (label) {
       FloodLabel.normal => ('Normal', Colors.green),
       FloodLabel.lowFlood => ('Low Flood', Colors.orange),
-      FloodLabel.deepFlood => ('Deep Flood', Colors.redAccent)
+      FloodLabel.deepFlood => ('Severe Flooding', Colors.redAccent)
     };
     return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
-        child: Text(text, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)));
+        decoration:
+            BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+        child: Text(text,
+            style: const TextStyle(
+                color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)));
   }
 }
 
@@ -449,26 +558,47 @@ class _FiltersCard extends StatelessWidget {
   final VoidCallback onPickRange;
   final TextEditingController searchCtrl;
   final ValueChanged<String> onSearchChanged;
-  const _FiltersCard({required this.locations, required this.selectedLocation, required this.onLocationChanged, required this.range, required this.onPickRange, required this.searchCtrl, required this.onSearchChanged});
+
+  const _FiltersCard({
+    required this.locations,
+    required this.selectedLocation,
+    required this.onLocationChanged,
+    required this.range,
+    required this.onPickRange,
+    required this.searchCtrl,
+    required this.onSearchChanged,
+  });
+
   @override
   Widget build(BuildContext context) => _CardShell(
       child: Padding(
           padding: const EdgeInsets.all(18),
-          child: Wrap(spacing: 12, runSpacing: 12, crossAxisAlignment: WrapCrossAlignment.center, children: [
-            const _CardTitle(icon: Icons.filter_alt_outlined, title: 'Historical Filters'),
-            _RangeButton(range: range, onPick: onPickRange),
-            _LocationDropdown(label: 'Location', value: selectedLocation, locations: locations, onChanged: onLocationChanged),
-            SizedBox(
-                width: 320,
-                child: TextField(
-                    controller: searchCtrl,
-                    onChanged: onSearchChanged,
-                    decoration: InputDecoration(
-                        hintText: 'Search timestamps...',
-                        prefixIcon: const Icon(Icons.search),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                        isDense: true)))
-          ])));
+          child: Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                const _CardTitle(
+                    icon: Icons.filter_alt_outlined,
+                    title: 'Historical Filters'),
+                _RangeButton(range: range, onPick: onPickRange),
+                _LocationDropdown(
+                    label: 'Location',
+                    value: selectedLocation,
+                    locations: locations,
+                    onChanged: onLocationChanged),
+                SizedBox(
+                    width: 320,
+                    child: TextField(
+                        controller: searchCtrl,
+                        onChanged: onSearchChanged,
+                        decoration: InputDecoration(
+                            hintText: 'Search timestamps...',
+                            prefixIcon: const Icon(Icons.search),
+                            border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12)),
+                            isDense: true)))
+              ])));
 }
 
 class _CardShell extends StatelessWidget {
@@ -479,7 +609,12 @@ class _CardShell extends StatelessWidget {
       decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 15, offset: const Offset(0, 5))],
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withValues(alpha: 0.03),
+                blurRadius: 15,
+                offset: const Offset(0, 5))
+          ],
           border: Border.all(color: Colors.black.withValues(alpha: 0.06))),
       child: child);
 }
@@ -489,8 +624,12 @@ class _CardTitle extends StatelessWidget {
   final String title;
   const _CardTitle({required this.icon, required this.title});
   @override
-  Widget build(BuildContext context) =>
-      Row(children: [Icon(icon, size: 18), const SizedBox(width: 10), Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))]);
+  Widget build(BuildContext context) => Row(children: [
+        Icon(icon, size: 18),
+        const SizedBox(width: 10),
+        Text(title,
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))
+      ]);
 }
 
 class _RangeButton extends StatelessWidget {
@@ -501,5 +640,7 @@ class _RangeButton extends StatelessWidget {
   Widget build(BuildContext context) => OutlinedButton.icon(
       onPressed: onPick,
       icon: const Icon(Icons.date_range),
-      label: Text(range == null ? 'Select Time Range' : '${range!.start.month}/${range!.start.day} - ${range!.end.month}/${range!.end.day}'));
+      label: Text(range == null
+          ? 'Select Time Range'
+          : '${range!.start.month}/${range!.start.day} - ${range!.end.month}/${range!.end.day}'));
 }

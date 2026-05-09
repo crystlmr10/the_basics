@@ -1,9 +1,13 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'pages/settings_page.dart';
-import 'pages/admin_dash.dart'; 
+import 'package:simple_animations/simple_animations.dart';
 
-// App entry: bootstraps Supabase + global settings controller.
+// Ensure these paths are correct for your project structure
+import 'pages/settings_page.dart';
+import 'pages/admin_dash.dart';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -120,8 +124,6 @@ class _FlooteLoginScreenState extends State<FlooteLoginScreen> {
     setState(() => _isLoading = true);
 
     try {
-      // 1. LOOKUP: Find the email and role associated with the Admin ID (username)
-      // This maps "admin.1" to "gironcrystalmarie@gmail.com"
       final userQuery = await Supabase.instance.client
           .from('profiles')
           .select('email, role')
@@ -135,18 +137,15 @@ class _FlooteLoginScreenState extends State<FlooteLoginScreen> {
       final String realEmail = userQuery['email'];
       final String role = userQuery['role'];
 
-      // 2. ROLE CHECK: Verify they are actually an admin
       if (role != 'admin') {
         throw Exception("Access Denied: This ID does not have admin privileges.");
       }
 
-      // 3. AUTHENTICATE: Log in with the real email and password
       await Supabase.instance.client.auth.signInWithPassword(
         email: realEmail,
         password: password,
       );
 
-      // 4. NAVIGATION: Success!
       if (mounted) {
         Navigator.pushReplacement(
           context,
@@ -163,7 +162,7 @@ class _FlooteLoginScreenState extends State<FlooteLoginScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Login failed: ${e.toString().replaceAll("Exception:", "")}'),
-            backgroundColor: Colors.redAccent,
+            backgroundColor: Theme.of(context).colorScheme.error,
           ),
         );
       }
@@ -175,82 +174,207 @@ class _FlooteLoginScreenState extends State<FlooteLoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF4F7FA),
-      body: Center(
-        child: Container(
-          width: 400,
-          padding: const EdgeInsets.all(32),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(16),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.05),
-                blurRadius: 20,
-              )
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.shield_outlined, size: 48, color: Color(0xFF1A1A1B)),
-              const SizedBox(height: 16),
-              const Text(
-                "Floote Admin",
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                "Master Controller Access",
-                style: TextStyle(color: Colors.grey, fontSize: 13),
-              ),
-              const SizedBox(height: 32),
-              TextField(
-                controller: _adminIdController,
-                decoration: const InputDecoration(
-                  labelText: "Admin ID",
-                  hintText: "e.g., admin.1",
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.person_outline),
-                ),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _passwordController,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: "Password",
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.lock_outline),
-                ),
-              ),
-              const SizedBox(height: 32),
-              SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: ElevatedButton(
-                  onPressed: _isLoading ? null : _adminLogin,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1A1A1B),
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
+      body: Stack(
+        children: [
+          const Positioned.fill(child: AnimatedWaveBackground()),
+          Center(
+            child: PlayAnimationBuilder<double>(
+              tween: Tween(begin: -20.0, end: 0.0),
+              duration: const Duration(seconds: 1),
+              curve: Curves.easeOut,
+              builder: (context, value, child) {
+                return Transform.translate(
+                  offset: Offset(0, value),
+                  child: child,
+                );
+              },
+              child: PlayAnimationBuilder<double>(
+                tween: Tween(begin: 0.95, end: 1.0),
+                duration: const Duration(seconds: 2),
+                curve: Curves.easeInOut,
+                builder: (context, value, child) {
+                  return Transform.scale(
+                    scale: value,
+                    child: child,
+                  );
+                },
+                child: Container(
+                  width: 400,
+                  padding: const EdgeInsets.all(32),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withAlpha((255 * 0.85).round()),
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withAlpha((255 * 0.1).round()),
+                        blurRadius: 30,
+                        offset: const Offset(0, 10),
+                      )
+                    ],
+                    border: Border.all(color: Colors.white.withAlpha((255 * 0.5).round())),
                   ),
-                  child: _isLoading
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(
-                              color: Colors.white, strokeWidth: 2),
-                        )
-                      : const Text("Access Dashboard", style: TextStyle(fontSize: 16)),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.shield_outlined, size: 48, color: Color(0xFF1A1A1B)),
+                      const SizedBox(height: 16),
+                      const Text(
+                        "Floote Admin",
+                        style: TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF1A1A1B),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        "Master Controller Access",
+                        style: TextStyle(color: Colors.grey[600], fontSize: 14),
+                      ),
+                      const SizedBox(height: 32),
+                      TextField(
+                        controller: _adminIdController,
+                        decoration: InputDecoration(
+                          labelText: "Admin ID",
+                          hintText: "e.g., admin.1",
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          prefixIcon: const Icon(Icons.person_outline),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _passwordController,
+                        obscureText: true,
+                        decoration: InputDecoration(
+                          labelText: "Password",
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          prefixIcon: const Icon(Icons.lock_outline),
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 50,
+                        child: ElevatedButton(
+                          onPressed: _isLoading ? null : _adminLogin,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF1A1A1B),
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            elevation: 5,
+                          ),
+                          child: _isLoading
+                              ? const SizedBox(
+                                  height: 20,
+                                  width: 20,
+                                  child: CircularProgressIndicator(
+                                      color: Colors.white, strokeWidth: 2),
+                                )
+                              : const Text("Access Dashboard",
+                                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ],
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
+}
+
+class AnimatedWaveBackground extends StatelessWidget {
+  const AnimatedWaveBackground({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final tween = MovieTween()
+      ..tween('color1', ColorTween(begin: Colors.blue.shade200, end: Colors.blue.shade400),
+          duration: const Duration(seconds: 4))
+      ..tween('color2', ColorTween(begin: Colors.cyan.shade200, end: Colors.cyan.shade400),
+          duration: const Duration(seconds: 4));
+
+    return LoopAnimationBuilder<Movie>(
+      tween: tween,
+      duration: tween.duration,
+      builder: (context, value, child) {
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [value.get("color1"), value.get("color2")],
+            ),
+          ),
+          child: child,
+        );
+      },
+      child: const Wave(),
+    );
+  }
+}
+
+class Wave extends StatelessWidget {
+  const Wave({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox.expand(
+      child: PlayAnimationBuilder<double>(
+        tween: Tween(begin: 0.0, end: 1.0),
+        duration: const Duration(seconds: 3),
+        builder: (context, value, child) {
+          return CustomPaint(
+            painter: WavePainter(animationValue: value),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class WavePainter extends CustomPainter {
+  final double animationValue;
+
+  WavePainter({required this.animationValue});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white.withAlpha((255 * 0.1).round())
+      ..style = PaintingStyle.fill;
+
+    final path = Path();
+    path.moveTo(0, size.height * 0.8);
+
+    for (double i = 0; i < size.width; i++) {
+      path.lineTo(
+        i,
+        size.height * 0.8 +
+            (animationValue * 10) *
+                (i / size.width * 2 - 1).abs() *
+                (i % 100 / 50 - 1).abs() *
+                20 *
+                (1 + math.sin(animationValue * 2 * math.pi)),
+      );
+    }
+
+    path.lineTo(size.width, size.height);
+    path.lineTo(0, size.height);
+    path.close();
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
