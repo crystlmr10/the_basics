@@ -99,7 +99,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       const sn.SensorNetworkPage(),
                       const HistoricalLogsPage(),
                       const AdminUserManagementPage(),
-                      const RescueCenterPage(),
+                      RescueCenterPage(settings: widget.settings),
                       const AccessControlPage(),
                       SettingsPage(settings: widget.settings),
                     ],

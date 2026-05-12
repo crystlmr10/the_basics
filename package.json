@@ -1,0 +1,10 @@
+{
+  "name": "the_basics",
+  "private": true,
+  "scripts": {
+    "deploy:admin-create-account": "supabase functions deploy admin-create-account"
+  },
+  "devDependencies": {
+    "supabase": "^2.98.2"
+  }
+}

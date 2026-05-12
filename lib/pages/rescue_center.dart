@@ -1,8 +1,13 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter/services.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../utils/sos_emergency_categories.dart';
+import 'settings_page.dart';
 
 // ─── Models ──────────────────────────────────────────────────────────────────
 
@@ -21,6 +26,10 @@ class SosDispatch {
   final String? emergencyOtherNote;
   final String? callerPhone;
   final String? assignedRescuerId;
+  final DateTime? updatedAt;
+  final DateTime? acceptedAt;
+  final DateTime? enRouteAt;
+  final DateTime? closedAt;
 
   const SosDispatch({
     required this.id,
@@ -37,6 +46,10 @@ class SosDispatch {
     this.emergencyOtherNote,
     this.callerPhone,
     this.assignedRescuerId,
+    this.updatedAt,
+    this.acceptedAt,
+    this.enRouteAt,
+    this.closedAt,
   });
 
   String get displayName => userName ?? userEmail ?? userId.substring(0, 8);
@@ -48,23 +61,47 @@ class SosDispatch {
     return emergencyMainCategory ?? emergencyOtherNote ?? 'Emergency';
   }
 
+  String get emergencyTypeDisplay => formatSosEmergencyTypeLine(
+        emergencyMainCategory,
+        emergencySubcategory,
+        emergencyOtherNote,
+      );
+
   factory SosDispatch.fromMap(Map<String, dynamic> m) {
     final profile = m['profiles'] as Map<String, dynamic>?;
+    final rawStatus = (m['status'] as String?)?.trim().toLowerCase();
+    final rawTicket = (m['ticket_number'] as String?)?.trim();
     return SosDispatch(
       id: m['id'] as String,
-      ticketNumber: m['ticket_number'] as String,
+      ticketNumber: (rawTicket == null || rawTicket.isEmpty)
+          ? 'SOS-${(m['id'] as String).substring(0, 6).toUpperCase()}'
+          : rawTicket,
       userId: m['user_id'] as String,
       userName: profile?['username'] as String?,
       userEmail: profile?['email'] as String?,
       latitude: (m['latitude'] as num).toDouble(),
       longitude: (m['longitude'] as num).toDouble(),
-      status: m['status'] as String,
+      status: (rawStatus == null || rawStatus.isEmpty)
+          ? 'submitted'
+          : rawStatus,
       submittedAt: DateTime.parse(m['submitted_at'] as String).toLocal(),
       emergencyMainCategory: m['emergency_main_category'] as String?,
       emergencySubcategory: m['emergency_subcategory'] as String?,
       emergencyOtherNote: m['emergency_other_note'] as String?,
       callerPhone: m['caller_phone'] as String?,
       assignedRescuerId: m['assigned_rescuer_id'] as String?,
+      updatedAt: m['updated_at'] != null
+          ? DateTime.parse(m['updated_at'] as String).toLocal()
+          : null,
+      acceptedAt: m['accepted_at'] != null
+          ? DateTime.parse(m['accepted_at'] as String).toLocal()
+          : null,
+      enRouteAt: m['en_route_at'] != null
+          ? DateTime.parse(m['en_route_at'] as String).toLocal()
+          : null,
+      closedAt: m['closed_at'] != null
+          ? DateTime.parse(m['closed_at'] as String).toLocal()
+          : null,
     );
   }
 }
@@ -159,7 +196,8 @@ class RescuerProfile {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 class RescueCenterPage extends StatefulWidget {
-  const RescueCenterPage({super.key});
+  final AppSettingsController? settings;
+  const RescueCenterPage({super.key, this.settings});
 
   @override
   State<RescueCenterPage> createState() => _RescueCenterPageState();
@@ -168,8 +206,10 @@ class RescueCenterPage extends StatefulWidget {
 class _RescueCenterPageState extends State<RescueCenterPage> {
   final _supabase = Supabase.instance.client;
   final MapController _mapController = MapController();
+  final Distance _distance = const Distance();
 
   List<SosDispatch> _incidents = [];
+  List<SosDispatch> _incidentHistory = [];
   List<UserReport> _userReports = [];
   List<RescuerProfile> _rescuers = [];
 
@@ -179,9 +219,11 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
 
   // UI state
   final Map<String, String> _assignedRescuerByIncidentId = {};
+  final Map<String, String> _queueNoticeByIncidentId = {};
   String? _expandedIncidentId;
   String? _selectedRescuerIdForExpandedIncident;
   UserReport? _selectedUserReport;
+  bool _showSosHistory = false;
 
   // Realtime
   StreamSubscription<List<Map<String, dynamic>>>? _sosSub;
@@ -204,6 +246,17 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
   }
 
   // ── Data Loading ────────────────────────────────────────────────────────────
+  bool _isActiveSosStatus(String status) {
+    switch (status.trim().toLowerCase()) {
+      case 'submitted':
+      case 'received':
+      case 'dispatching':
+      case 'en_route':
+        return true;
+      default:
+        return false;
+    }
+  }
 
   Future<void> _loadAll() async {
     setState(() {
@@ -224,19 +277,23 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
   }
 
   Future<void> _loadIncidents() async {
+    final previousById = {
+      for (final incident in _incidents) incident.id: incident,
+    };
     final data = await _supabase
         .from('sos_dispatches')
         .select('*, profiles!sos_dispatches_user_id_fkey(username, email)')
-        .neq('status', 'closed')
         .order('submitted_at', ascending: false);
 
     final list = (data as List)
         .map((m) => SosDispatch.fromMap(m as Map<String, dynamic>))
         .toList();
+    final activeList = list.where((inc) => _isActiveSosStatus(inc.status)).toList();
 
     if (mounted) {
       setState(() {
-        _incidents = list;
+        _incidents = activeList;
+        _incidentHistory = list;
         // Sync assignment map from DB
         for (final inc in list) {
           if (inc.assignedRescuerId != null) {
@@ -244,6 +301,7 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
           }
         }
       });
+      _emitQueueWorkflowUpdates(previousById, list);
     }
   }
 
@@ -302,13 +360,38 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
     setState(() => _assigning = true);
 
     try {
-      await _supabase.from('sos_dispatches').update({
-        'assigned_rescuer_id': rescuerId,
-        'status': 'dispatching',
-      }).eq('id', incidentId);
+      final updatedRows = await _supabase
+          .from('sos_dispatches')
+          .update({
+            'assigned_rescuer_id': rescuerId,
+            'status': 'dispatching',
+          })
+          .eq('id', incidentId)
+          .isFilter('assigned_rescuer_id', null)
+          .inFilter('status', ['submitted', 'received'])
+          .select('id');
+
+      if (updatedRows.isEmpty) {
+        _notifyRealtimeEvent(
+          'Request already accepted by rescuer. Assignment was not changed.',
+          color: Colors.orange.shade800,
+        );
+        if (mounted) {
+          setState(() {
+            _queueNoticeByIncidentId[incidentId] =
+                'A rescuer already accepted this request.';
+            _expandedIncidentId = null;
+            _selectedRescuerIdForExpandedIncident = null;
+          });
+        }
+        await _loadIncidents();
+        return;
+      }
 
       setState(() {
         _assignedRescuerByIncidentId[incidentId] = rescuerId;
+        _queueNoticeByIncidentId[incidentId] =
+            'Admin assigned ${_rescuerNameById(rescuerId)}.';
         _expandedIncidentId = null;
         _selectedRescuerIdForExpandedIncident = null;
       });
@@ -319,23 +402,14 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Rescuer dispatched successfully'),
-            backgroundColor: Colors.green,
-          ),
-        );
+        _notifyRealtimeEvent('Rescuer dispatched successfully',
+            color: Colors.green);
       }
 
       await _loadAll();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to assign rescuer: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        _notifyRealtimeEvent('Failed to assign rescuer: $e', color: Colors.red);
       }
     } finally {
       if (mounted) setState(() => _assigning = false);
@@ -343,11 +417,142 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
+  String _rescuerNameById(String? rescuerId) {
+    if (rescuerId == null) return 'rescuer';
+    final match = _rescuers.where((r) => r.id == rescuerId).firstOrNull;
+    return match?.displayName ?? 'rescuer';
+  }
 
-  List<RescuerProfile> _availableRescuers() => _rescuers
-      .where((r) =>
-          r.isOnDuty && !_assignedRescuerByIncidentId.values.contains(r.id))
-      .toList();
+  double? _distanceKmToIncident(SosDispatch incident, RescuerProfile rescuer) {
+    if (rescuer.lastLatitude == null || rescuer.lastLongitude == null) {
+      return null;
+    }
+    return _distance.as(
+      LengthUnit.Kilometer,
+      LatLng(incident.latitude, incident.longitude),
+      LatLng(rescuer.lastLatitude!, rescuer.lastLongitude!),
+    );
+  }
+
+  Duration? _etaFromDistanceKm(double? distanceKm) {
+    if (distanceKm == null) return null;
+    final minutes = math.max(1, (distanceKm / 28.0 * 60).round());
+    return Duration(minutes: minutes);
+  }
+
+  _RescuerSearchResult _rescuersForIncidentDispatch(SosDispatch incident) {
+    final available = _rescuers.where((r) =>
+        r.isOnDuty &&
+        !_assignedRescuerByIncidentId.values.contains(r.id) &&
+        r.lastLatitude != null &&
+        r.lastLongitude != null);
+
+    final candidates = available
+        .map((r) => _RescuerCandidate(
+              rescuer: r,
+              distanceKm: _distanceKmToIncident(incident, r)!,
+            ))
+        .toList()
+      ..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
+
+    if (candidates.isEmpty) {
+      return const _RescuerSearchResult(
+        candidates: [],
+        radiusKmUsed: 10,
+        expandedFrom10km: false,
+      );
+    }
+
+    var radius = 10.0;
+    while (radius <= 50.0) {
+      final within = candidates.where((c) => c.distanceKm <= radius).toList();
+      if (within.isNotEmpty) {
+        return _RescuerSearchResult(
+          candidates: within,
+          radiusKmUsed: radius,
+          expandedFrom10km: radius > 10.0,
+        );
+      }
+      radius += 5.0;
+    }
+
+    return _RescuerSearchResult(
+      candidates: candidates,
+      radiusKmUsed: candidates.last.distanceKm,
+      expandedFrom10km: true,
+    );
+  }
+
+  String _formatEta(Duration eta) {
+    final h = eta.inHours;
+    final m = eta.inMinutes.remainder(60);
+    if (h <= 0) return '$m min';
+    if (m == 0) return '$h hr';
+    return '$h hr $m min';
+  }
+
+  void _notifyRealtimeEvent(String message, {Color color = Colors.blueGrey}) {
+    if (!mounted) return;
+    if (widget.settings?.soundAlerts ?? true) {
+      SystemSound.play(SystemSoundType.alert);
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: color,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  void _emitQueueWorkflowUpdates(
+    Map<String, SosDispatch> previousById,
+    List<SosDispatch> nextList,
+  ) {
+    for (final next in nextList) {
+      final prev = previousById[next.id];
+      if (prev == null) continue;
+
+      final statusChanged = prev.status != next.status;
+      final assignmentChanged = prev.assignedRescuerId != next.assignedRescuerId;
+      if (!statusChanged && !assignmentChanged) continue;
+
+      if (assignmentChanged &&
+          prev.assignedRescuerId != null &&
+          next.assignedRescuerId == null &&
+          (next.status == 'submitted' || next.status == 'received')) {
+        final notice = '${_rescuerNameById(prev.assignedRescuerId)} declined the request.';
+        setState(() => _queueNoticeByIncidentId[next.id] = notice);
+        _notifyRealtimeEvent(notice, color: Colors.orange.shade800);
+      }
+
+      if (assignmentChanged &&
+          prev.assignedRescuerId == null &&
+          next.assignedRescuerId != null) {
+        final notice = '${_rescuerNameById(next.assignedRescuerId)} accepted ${next.ticketNumber}.';
+        setState(() => _queueNoticeByIncidentId[next.id] = notice);
+        _notifyRealtimeEvent(notice, color: Colors.blue.shade700);
+      }
+
+      if (statusChanged) {
+        final phase = _formatSosDispatchStatusForBadge(next.status);
+        if (next.status == 'en_route') {
+          final notice = '${_rescuerNameById(next.assignedRescuerId)} is en route.';
+          setState(() => _queueNoticeByIncidentId[next.id] = notice);
+          _notifyRealtimeEvent('$phase: ${next.ticketNumber}', color: Colors.teal);
+        } else if (next.status == 'closed') {
+          setState(() => _queueNoticeByIncidentId.remove(next.id));
+          _notifyRealtimeEvent('${next.ticketNumber} is now closed.',
+              color: Colors.green.shade700);
+        } else {
+          _notifyRealtimeEvent(
+            '${next.ticketNumber} status updated to $phase',
+            color: Colors.blueGrey,
+          );
+        }
+      }
+    }
+  }
 
   List<Polyline> _activeMissionsPolylines() {
     final polylines = <Polyline>[];
@@ -450,7 +655,7 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
                   flex: 1,
                   child: Column(
                     children: [
-                      // Incident Reports
+                      // SOS Reports
                       Expanded(
                         child: _CardShell(
                           child: Column(
@@ -461,26 +666,48 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
                                     const EdgeInsets.fromLTRB(18, 18, 18, 10),
                                 child: Row(
                                   children: [
-                                    const Text(
-                                      'Incident Reports',
-                                      style: TextStyle(
-                                          fontWeight: FontWeight.w900,
-                                          fontSize: 16),
+                                    Container(
+                                      padding: const EdgeInsets.all(4),
+                                      decoration: BoxDecoration(
+                                        color: Colors.blueGrey.withValues(alpha: 0.08),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          _SosTabButton(
+                                            label: 'SOS Reports',
+                                            selected: !_showSosHistory,
+                                            onTap: () => setState(
+                                                () => _showSosHistory = false),
+                                          ),
+                                          _SosTabButton(
+                                            label: 'SOS History',
+                                            selected: _showSosHistory,
+                                            onTap: () => setState(
+                                                () => _showSosHistory = true),
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                     const Spacer(),
                                     Container(
                                       padding: const EdgeInsets.symmetric(
                                           horizontal: 10, vertical: 4),
                                       decoration: BoxDecoration(
-                                        color: Colors.redAccent
-                                            .withValues(alpha: 0.10),
+                                        color: _showSosHistory
+                                            ? Colors.blueGrey.withValues(alpha: 0.10)
+                                            : Colors.redAccent.withValues(alpha: 0.10),
                                         borderRadius:
                                             BorderRadius.circular(999),
                                       ),
                                       child: Text(
-                                        '${_incidents.length} active',
-                                        style: const TextStyle(
-                                          color: Colors.redAccent,
+                                        _showSosHistory
+                                            ? '${_incidentHistory.length} total'
+                                            : '${_incidents.length} active',
+                                        style: TextStyle(
+                                          color: _showSosHistory
+                                              ? Colors.blueGrey
+                                              : Colors.redAccent,
                                           fontWeight: FontWeight.w900,
                                           fontSize: 12,
                                         ),
@@ -491,15 +718,17 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
                               ),
                               const Divider(height: 1),
                               Expanded(
-                                child: _incidents.isEmpty
-                                    ? const Center(
+                                child: _showSosHistory
+                                    ? _buildSosHistoryList()
+                                    : _incidents.isEmpty
+                                        ? const Center(
                                         child: Text(
-                                          'No active incidents',
+                                          'No active SOS reports',
                                           style: TextStyle(
                                               color: Colors.blueGrey),
                                         ),
                                       )
-                                    : ListView.separated(
+                                        : ListView.separated(
                                         padding: const EdgeInsets.all(16),
                                         itemCount: _incidents.length,
                                         separatorBuilder: (_, __) =>
@@ -509,26 +738,55 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
                                           final assignedRescuerId =
                                               _assignedRescuerByIncidentId[
                                                   inc.id];
+                                          final assignedRescuer = _rescuers
+                                              .where((r) =>
+                                                  r.id == assignedRescuerId)
+                                              .firstOrNull;
+                                          final assignedDistanceKm =
+                                              assignedRescuer == null
+                                                  ? null
+                                                  : _distanceKmToIncident(
+                                                      inc, assignedRescuer);
+                                          final eta = _etaFromDistanceKm(
+                                              assignedDistanceKm);
+                                          final rescuerSearch =
+                                              _rescuersForIncidentDispatch(inc);
                                           final isExpanded =
                                               _expandedIncidentId == inc.id;
                                           return _IncidentCard(
                                             incident: inc,
                                             assignedRescuerId:
                                                 assignedRescuerId,
+                                            assignedRescuerName:
+                                                assignedRescuer?.displayName,
+                                            assignedDistanceKm:
+                                                assignedDistanceKm,
+                                            assignedEtaLabel:
+                                                eta == null ? null : _formatEta(eta),
+                                            workflowNotice:
+                                                _queueNoticeByIncidentId[inc.id],
                                             isExpanded: isExpanded,
-                                            rescuers: _availableRescuers(),
+                                            rescuers: rescuerSearch.candidates,
+                                            expandedSearchRadiusKm:
+                                                rescuerSearch.expandedFrom10km
+                                                    ? rescuerSearch.radiusKmUsed
+                                                    : null,
                                             selectedRescuerId: isExpanded
                                                 ? _selectedRescuerIdForExpandedIncident
                                                 : null,
                                             assigning: _assigning &&
                                                 _expandedIncidentId == inc.id,
                                             onDispatchToggle: () {
+                                              final options =
+                                                  _rescuersForIncidentDispatch(
+                                                      inc);
                                               setState(() {
                                                 _expandedIncidentId = inc.id;
                                                 _selectedRescuerIdForExpandedIncident =
-                                                    _availableRescuers()
+                                                    options.candidates
                                                         .firstOrNull
-                                                        ?.id;
+                                                        ?.rescuer
+                                                        .id;
                                               });
                                             },
                                             onRescuerSelected: (id) =>
@@ -803,6 +1061,204 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
       ),
     );
   }
+
+  Widget _buildSosHistoryList() {
+    if (_incidentHistory.isEmpty) {
+      return const Center(
+        child: Text(
+          'No SOS history yet',
+          style: TextStyle(color: Colors.blueGrey),
+        ),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.all(16),
+      itemCount: _incidentHistory.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 10),
+      itemBuilder: (context, index) {
+        final incident = _incidentHistory[index];
+        final rescuer = _rescuers
+            .where((r) => r.id == incident.assignedRescuerId)
+            .firstOrNull;
+        final statusBadge = _formatSosDispatchStatusForBadge(incident.status);
+        final closedAt = incident.closedAt ??
+            (incident.status == 'closed' ? incident.updatedAt : null);
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.black.withValues(alpha: 0.06)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      incident.ticketNumber,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: incident.status == 'closed'
+                          ? Colors.green.withValues(alpha: 0.12)
+                          : Colors.orange.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      statusBadge,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 11,
+                        color: incident.status == 'closed'
+                            ? Colors.green.shade700
+                            : Colors.orange.shade800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Rescuer: ${rescuer?.displayName ?? 'Unassigned'}',
+                style: TextStyle(
+                  color: Colors.blueGrey.shade800,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Opened: ${_formatDateTime(incident.submittedAt)}',
+                style: TextStyle(
+                  color: Colors.blueGrey.shade700,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 11,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                'Closed: ${closedAt != null ? _formatDateTime(closedAt) : '—'}',
+                style: TextStyle(
+                  color: Colors.blueGrey.shade700,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Badge text: first letter of each word capitalized (handles `en_route` → "En Route").
+String _formatSosDispatchStatusForBadge(String? raw) {
+  final s = raw?.trim() ?? '';
+  if (s.isEmpty) return '—';
+  return s
+      .split(RegExp(r'[\s_]+'))
+      .where((w) => w.isNotEmpty)
+      .map((w) {
+        final lower = w.toLowerCase();
+        return '${lower[0].toUpperCase()}${lower.substring(1)}';
+      })
+      .join(' ');
+}
+
+class _SosPinHeaderIcon extends StatelessWidget {
+  const _SosPinHeaderIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    const double pinSize = 22;
+    return SizedBox(
+      width: pinSize,
+      height: pinSize + 2,
+      child: Stack(
+        alignment: Alignment.center,
+        clipBehavior: Clip.none,
+        children: [
+          Icon(
+            Icons.location_on,
+            size: 24,
+            color: Colors.red.shade700,
+          ),
+          Positioned(
+            top: 1,
+            child: Container(
+              width: 13,
+              height: 13,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.red.shade700,
+                border: Border.all(color: Colors.white, width: 1.2),
+              ),
+              alignment: Alignment.center,
+              child: const Text(
+                'SOS',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 5.5,
+                  height: 1,
+                  letterSpacing: -0.3,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SosTabButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _SosTabButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? Colors.white : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          border: selected
+              ? Border.all(color: Colors.black.withValues(alpha: 0.08))
+              : null,
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+            fontSize: 12,
+            color: selected ? Colors.black87 : Colors.blueGrey,
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ─── Incident Card ────────────────────────────────────────────────────────────
@@ -810,8 +1266,13 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
 class _IncidentCard extends StatelessWidget {
   final SosDispatch incident;
   final String? assignedRescuerId;
+  final String? assignedRescuerName;
+  final double? assignedDistanceKm;
+  final String? assignedEtaLabel;
+  final String? workflowNotice;
   final bool isExpanded;
-  final List<RescuerProfile> rescuers;
+  final List<_RescuerCandidate> rescuers;
+  final double? expandedSearchRadiusKm;
   final String? selectedRescuerId;
   final bool assigning;
   final VoidCallback onDispatchToggle;
@@ -823,8 +1284,13 @@ class _IncidentCard extends StatelessWidget {
   const _IncidentCard({
     required this.incident,
     required this.assignedRescuerId,
+    required this.assignedRescuerName,
+    required this.assignedDistanceKm,
+    required this.assignedEtaLabel,
+    required this.workflowNotice,
     required this.isExpanded,
     required this.rescuers,
+    required this.expandedSearchRadiusKm,
     required this.selectedRescuerId,
     required this.assigning,
     required this.onDispatchToggle,
@@ -837,6 +1303,9 @@ class _IncidentCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isAssigned = assignedRescuerId != null;
+    final phoneRaw = incident.callerPhone?.trim();
+    final phoneDisplay =
+        (phoneRaw != null && phoneRaw.isNotEmpty) ? phoneRaw : '—';
 
     return Material(
       color: Colors.white,
@@ -850,98 +1319,110 @@ class _IncidentCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Header row
             Row(
               children: [
-                const Icon(Icons.person_pin_circle,
-                    color: Colors.redAccent, size: 20),
+                const _SosPinHeaderIcon(),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        incident.displayName,
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w900, fontSize: 14),
-                      ),
-                      Text(
-                        incident.ticketNumber,
-                        style: TextStyle(
-                            color: Colors.blueGrey.shade500,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600),
-                      ),
-                    ],
+                  child: Text(
+                    incident.ticketNumber,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: 16,
+                    ),
                   ),
                 ),
-                if (isAssigned)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 5),
-                    decoration: BoxDecoration(
-                      color: Colors.blue.withValues(alpha: 0.10),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: const Text(
-                      'Assigned',
-                      style: TextStyle(
-                          color: Colors.blue,
-                          fontWeight: FontWeight.w900,
-                          fontSize: 11),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: isAssigned
+                        ? Colors.blue.withValues(alpha: 0.12)
+                        : Colors.orange.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    _formatSosDispatchStatusForBadge(incident.status),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 11,
+                      color: isAssigned ? Colors.blue.shade700 : null,
                     ),
                   ),
+                ),
               ],
             ),
-
             const SizedBox(height: 8),
-
-            // ── Coordinates
             Text(
-              'Coords: ${incident.latitude.toStringAsFixed(5)}, '
+              incident.displayName,
+              style: const TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              phoneDisplay,
+              style: TextStyle(
+                color: Colors.blueGrey.shade700,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              incident.emergencyTypeDisplay,
+              style: TextStyle(
+                color: Colors.blueGrey.shade800,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
+            ),
+            Text(
+              '${incident.latitude.toStringAsFixed(5)}, '
               '${incident.longitude.toStringAsFixed(5)}',
               style: TextStyle(
+                color: Colors.blueGrey.shade600,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (assignedRescuerName != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Assigned rescuer: $assignedRescuerName',
+                style: TextStyle(
                   color: Colors.blueGrey.shade700,
                   fontWeight: FontWeight.w700,
-                  fontSize: 11),
-            ),
-
-            const SizedBox(height: 6),
-
-            // ── Category
-            if (incident.emergencyMainCategory != null) ...[
-              Row(
-                children: [
-                  const Icon(Icons.warning_amber_rounded,
-                      size: 14, color: Colors.orange),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      incident.categoryLabel,
-                      style: TextStyle(
-                          color: Colors.orange.shade800,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 11),
-                    ),
-                  ),
-                ],
+                  fontSize: 12,
+                ),
               ),
-              const SizedBox(height: 6),
             ],
-
-            // ── Status chip
-            Row(
-              children: [
-                const Text('Status: ',
-                    style: TextStyle(
-                        fontWeight: FontWeight.w900,
-                        fontSize: 12,
-                        color: Colors.blueGrey)),
-                _StatusChip(status: incident.status),
-              ],
-            ),
-
-            const SizedBox(height: 10),
+            if (isAssigned && incident.updatedAt != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                'Accepted: ${formatDateTime(incident.acceptedAt ?? incident.updatedAt!)}',
+                style: TextStyle(
+                  color: Colors.blueGrey.shade600,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+            if (isAssigned &&
+                assignedDistanceKm != null &&
+                assignedEtaLabel != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                'ETA: $assignedEtaLabel • ${assignedDistanceKm!.toStringAsFixed(1)} km',
+                style: TextStyle(
+                  color: Colors.blueGrey.shade700,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
 
             // ── Action buttons
             Row(
@@ -963,7 +1444,7 @@ class _IncidentCard extends StatelessWidget {
                 Expanded(
                   child: ElevatedButton.icon(
                     onPressed: isAssigned ? null : onDispatchToggle,
-                    icon: const Icon(Icons.safety_divider, size: 16),
+                      icon: const Icon(Icons.safety_divider, size: 16),
                     label: const Text('Dispatch',
                         style: TextStyle(fontWeight: FontWeight.w900)),
                     style: ElevatedButton.styleFrom(
@@ -1008,6 +1489,32 @@ class _IncidentCard extends StatelessWidget {
                   ),
                 )
               else ...[
+                if (expandedSearchRadiusKm != null) ...[
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.radar, size: 16, color: Colors.blue.shade700),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'No rescuer within 10 km. Radius expanded to ${expandedSearchRadiusKm!.toStringAsFixed(0)} km.',
+                            style: TextStyle(
+                              color: Colors.blue.shade700,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
                 InputDecorator(
                   decoration: InputDecoration(
                     labelText: 'Select Rescuer',
@@ -1019,13 +1526,15 @@ class _IncidentCard extends StatelessWidget {
                   ),
                   child: DropdownButtonHideUnderline(
                     child: DropdownButton<String>(
+                      key: ValueKey(selectedRescuerId),
                       value: selectedRescuerId,
                       isExpanded: true,
                       isDense: true,
                       items: rescuers
                           .map((r) => DropdownMenuItem(
-                                value: r.id,
-                                child: Text(r.displayName,
+                                value: r.rescuer.id,
+                                child: Text(
+                                    '${r.rescuer.displayName} • ${r.distanceKm.toStringAsFixed(1)} km',
                                     overflow: TextOverflow.ellipsis),
                               ))
                           .toList(),
@@ -1058,6 +1567,25 @@ class _IncidentCard extends StatelessWidget {
                 ),
               ],
             ],
+            if (workflowNotice != null && workflowNotice!.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.amber.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  workflowNotice!,
+                  style: const TextStyle(
+                    color: Colors.orange,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ],
 
             const SizedBox(height: 8),
 
@@ -1074,6 +1602,26 @@ class _IncidentCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _RescuerCandidate {
+  final RescuerProfile rescuer;
+  final double distanceKm;
+  const _RescuerCandidate({
+    required this.rescuer,
+    required this.distanceKm,
+  });
+}
+
+class _RescuerSearchResult {
+  final List<_RescuerCandidate> candidates;
+  final double radiusKmUsed;
+  final bool expandedFrom10km;
+  const _RescuerSearchResult({
+    required this.candidates,
+    required this.radiusKmUsed,
+    required this.expandedFrom10km,
+  });
 }
 
 // ─── User Report Popup ────────────────────────────────────────────────────────
@@ -1274,63 +1822,6 @@ class _UserReportPopup extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-// ─── Status Chip ─────────────────────────────────────────────────────────────
-
-class _StatusChip extends StatelessWidget {
-  final String status;
-  const _StatusChip({required this.status});
-
-  Color get _color {
-    switch (status) {
-      case 'submitted':
-        return Colors.orange;
-      case 'received':
-        return Colors.blue;
-      case 'dispatching':
-        return Colors.purple;
-      case 'en_route':
-        return Colors.teal;
-      case 'closed':
-        return Colors.grey;
-      default:
-        return Colors.blueGrey;
-    }
-  }
-
-  String get _label {
-    switch (status) {
-      case 'submitted':
-        return 'Submitted';
-      case 'received':
-        return 'Received';
-      case 'dispatching':
-        return 'Dispatching';
-      case 'en_route':
-        return 'En Route';
-      case 'closed':
-        return 'Closed';
-      default:
-        return status;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: _color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        _label,
-        style: TextStyle(
-            color: _color, fontWeight: FontWeight.w900, fontSize: 11),
       ),
     );
   }

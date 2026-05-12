@@ -1,0 +1,22 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Supabase: deploy admin-create-account",
+      "type": "shell",
+      "command": "npm run deploy:admin-create-account -- --project-ref ${input:supabaseProjectRef}",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {}
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "supabaseProjectRef",
+      "type": "promptString",
+      "description": "Project ref (Dashboard → Project Settings → General → Reference ID)"
+    }
+  ]
+}

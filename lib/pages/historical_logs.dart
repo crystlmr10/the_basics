@@ -1,6 +1,7 @@
-import 'dart:math';
+import 'dart:math' as math;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 // --- DATABASE MODEL ---
@@ -44,7 +45,14 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
 
   DateTimeRange? _range;
   String _locationFilter = 'All';
-  String _chartLocation = 'LORA-TABUNOK';
+  /// Must match `sensor_logs.sensor_id` values from deployed LoRa nodes.
+  String _chartLocation = 'LORA-MASTER-TAB';
+
+  static const List<String> _preferredSensorOrder = [
+    'LORA-MASTER-TAB',
+    'LORA-TABUNOC-MB',
+    'LORA-LINAO',
+  ];
 
   @override
   void initState() {
@@ -63,10 +71,17 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
     super.dispose();
   }
 
-  List<String> get _locations => const [
-        'All',
-        'LORA-TABUNOC',
-      ];
+  List<String> _locationOptions(List<HistoricalLogRow> rows) {
+    final fromDb =
+        rows.map((r) => r.location).where((s) => s.isNotEmpty).toSet();
+    final out = <String>['All', ..._preferredSensorOrder];
+    final extras = fromDb.where((s) => !out.contains(s)).toList()..sort();
+    out.addAll(extras);
+    return out;
+  }
+
+  List<String> _chartLocationChoices(List<String> locationOptions) =>
+      locationOptions.where((l) => l != 'All').toList();
 
   @override
   Widget build(BuildContext context) {
@@ -85,8 +100,27 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
             ? _seedCurvedMockData()
             : snapshot.data!;
 
+        final locationOptions = _locationOptions(allData);
+        final chartChoices = _chartLocationChoices(locationOptions);
+        final filterInvalid = !locationOptions.contains(_locationFilter);
+        final chartInvalid =
+            chartChoices.isNotEmpty && !chartChoices.contains(_chartLocation);
+        if (filterInvalid || chartInvalid) {
+          SchedulerBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            setState(() {
+              if (filterInvalid) _locationFilter = 'All';
+              if (chartInvalid && chartChoices.isNotEmpty) {
+                _chartLocation = chartChoices.first;
+              }
+            });
+          });
+        }
+
         final filtered = _applyFilters(allData);
-        final chartRows = filtered
+        final chartSource =
+            _locationFilter == 'All' ? allData : filtered;
+        final chartRows = chartSource
             .where((r) => r.location == _chartLocation)
             .toList()
             ..sort((a, b) => a.ts.compareTo(b.ts));
@@ -98,7 +132,7 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 _FiltersCard(
-                  locations: _locations,
+                  locations: locationOptions,
                   selectedLocation: _locationFilter,
                   onLocationChanged: (v) => setState(() => _locationFilter = v),
                   range: _range,
@@ -135,7 +169,8 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
                   height: 450,
                   child: _TrendCard(
                     scheme: scheme,
-                    chartLocations: _locations.where((l) => l != 'All').toList(),
+                    chartLocations:
+                        _chartLocationChoices(locationOptions),
                     chartLocation: _chartLocation,
                     onChartLocationChanged: (v) => setState(() => _chartLocation = v),
                     chartRows: chartRows,
@@ -162,8 +197,12 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
           return false;
         }
       }
-      if (q.isNotEmpty && !row.location.toLowerCase().contains(q)) {
-        return false;
+      if (q.isNotEmpty) {
+        final tsStr = _HistoricalLogsPageState._formatTs(row.ts).toLowerCase();
+        final loc = row.location.toLowerCase();
+        if (!tsStr.contains(q) && !loc.contains(q)) {
+          return false;
+        }
       }
       return true;
     }).toList()
@@ -193,15 +232,14 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
 
   static List<HistoricalLogRow> _seedCurvedMockData() {
     final now = DateTime.now();
-    final locations = <String>['LORA-TABUNOK'];
     final rows = <HistoricalLogRow>[];
-    for (final loc in locations) {
+    for (final loc in _preferredSensorOrder) {
       for (int i = 0; i < 24; i++) {
         final ts = now.subtract(Duration(hours: 23 - i));
-        final angle = (i / 24.0) * 2 * pi;
-        final cm = 15.0 + (10.0 * sin(angle - (pi / 2)));
+        final angle = (i / 24.0) * 2 * math.pi;
+        final cm = 15.0 + (10.0 * math.sin(angle - (math.pi / 2)));
         rows.add(HistoricalLogRow(
-            id: 'MOCK-$i',
+            id: 'MOCK-$loc-$i',
             ts: ts,
             location: loc,
             waterLevelCm: cm.clamp(2.0, 95.0)));
@@ -276,10 +314,10 @@ class _TrendCard extends StatelessWidget {
         .entries
         .map((e) => FlSpot(e.key.toDouble(), e.value.waterLevelCm))
         .toList();
-    final maxY = (chartRows.isEmpty
-            ? 100.0
-            : chartRows.map((e) => e.waterLevelCm).reduce((a, b) => a > b ? a : b)) +
-        10;
+    final maxCm = chartRows.isEmpty
+        ? 100.0
+        : chartRows.map((e) => e.waterLevelCm).reduce((a, b) => a > b ? a : b);
+    final maxY = math.max(20.0, maxCm + 10);
 
     return _CardShell(
       child: Padding(
@@ -332,7 +370,7 @@ class _TrendCard extends StatelessWidget {
                           sideTitles: SideTitles(
                             showTitles: true,
                             reservedSize: 45,
-                            interval: 20,
+                            interval: math.max(5, (maxY / 5).floorToDouble()),
                             getTitlesWidget: (v, meta) => Text('${v.toInt()}cm',
                                 style: const TextStyle(
                                     fontSize: 10,
@@ -343,18 +381,30 @@ class _TrendCard extends StatelessWidget {
                         bottomTitles: AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
-                            interval: (chartRows.length / 6)
-                                .clamp(1, 999)
-                                .toDouble(),
+                            interval: chartRows.length <= 1
+                                ? 1
+                                : (chartRows.length / 6)
+                                    .clamp(1, 999)
+                                    .toDouble(),
                             getTitlesWidget: (v, meta) {
+                              if (chartRows.isEmpty) {
+                                return const SizedBox.shrink();
+                              }
                               final idx = v
                                   .round()
                                   .clamp(0, chartRows.length - 1);
+                              final t = chartRows[idx].ts;
+                              String two(int n) =>
+                                  n.toString().padLeft(2, '0');
+                              final label =
+                                  '${two(t.month)}/${two(t.day)} ${two(t.hour)}:${two(t.minute)}';
                               return Padding(
                                 padding: const EdgeInsets.only(top: 8.0),
-                                child: Text('${chartRows[idx].ts.hour}:00',
-                                    style: const TextStyle(
-                                        fontSize: 10, color: Colors.grey)),
+                                child: Text(
+                                  label,
+                                  style: const TextStyle(
+                                      fontSize: 9, color: Colors.grey),
+                                ),
                               );
                             },
                           ),
@@ -386,8 +436,13 @@ class _TrendCard extends StatelessWidget {
                           tooltipRoundedRadius: 8,
                           getTooltipItems: (touchedSpots) => touchedSpots
                               .map((s) {
+                            final i =
+                                s.x.round().clamp(0, chartRows.length - 1);
+                            final t = chartRows[i].ts;
+                            final line =
+                                '${_HistoricalLogsPageState._formatTs(t)} — ${s.y.toInt()} cm';
                             return LineTooltipItem(
-                                '${s.y.toInt()} cm',
+                                line,
                                 const TextStyle(
                                     color: Colors.white,
                                     fontWeight: FontWeight.bold));
@@ -480,13 +535,16 @@ class _LocationDropdown extends StatelessWidget {
   Widget build(BuildContext context) {
     // 1. Remove duplicate items using toSet()
     final distinctItems = locations.toSet().toList();
+    final safeValue = distinctItems.contains(value)
+        ? value
+        : (distinctItems.isEmpty ? null : distinctItems.first);
 
     return SizedBox(
       width: 260,
       height: compact ? 44 : null,
       child: DropdownButtonFormField<String>(
-        key: ValueKey(value),
-        initialValue: distinctItems.contains(value) ? value : null,
+        key: ValueKey('$safeValue-${distinctItems.join('|')}'),
+        initialValue: safeValue,
         items: distinctItems
             .map((l) => DropdownMenuItem(
                   value: l,

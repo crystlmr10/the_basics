@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../utils/philippine_mobile_input_formatter.dart';
+import '../utils/philippine_phone.dart';
 
 class AccessControlPage extends StatefulWidget {
   const AccessControlPage({super.key});
@@ -30,8 +34,11 @@ class _AccessControlPageState extends State<AccessControlPage> {
   String _selectedRole = 'Admin';
 
   // Create Account
-  final _nameCtrl = TextEditingController();
+  final _firstNameCtrl = TextEditingController();
+  final _middleNameCtrl = TextEditingController();
+  final _lastNameCtrl = TextEditingController();
   final _usernameCtrl = TextEditingController();
+  final _phoneCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
   String _newAccountRole = 'Rescuer';
   bool _obscurePassword = true;
@@ -41,8 +48,11 @@ class _AccessControlPageState extends State<AccessControlPage> {
 
   @override
   void dispose() {
-    _nameCtrl.dispose();
+    _firstNameCtrl.dispose();
+    _middleNameCtrl.dispose();
+    _lastNameCtrl.dispose();
     _usernameCtrl.dispose();
+    _phoneCtrl.dispose();
     _passwordCtrl.dispose();
     super.dispose();
   }
@@ -50,12 +60,47 @@ class _AccessControlPageState extends State<AccessControlPage> {
   // ── Supabase: Create Account ─────────────────────────────────────────────
 
   Future<void> _createAccount() async {
-    final name = _nameCtrl.text.trim();
+    final firstName = _firstNameCtrl.text.trim();
+    final middleName = _middleNameCtrl.text.trim();
+    final lastName = _lastNameCtrl.text.trim();
+    final name = [firstName, middleName, lastName]
+        .where((part) => part.isNotEmpty)
+        .join(' ');
     final username = _usernameCtrl.text.trim();
     final password = _passwordCtrl.text;
+    final role = _newAccountRole.toLowerCase();
+    final usernameRule = RegExp(r'^[a-zA-Z0-9._-]{3,32}$');
+    final phoneE164 = normalizePhilippineMobile(_phoneCtrl.text);
+    final nationalDigits = extractPhilippineNationalInputDigits(_phoneCtrl.text);
 
-    if (name.isEmpty || username.isEmpty || password.isEmpty) {
+    if (firstName.isEmpty ||
+        lastName.isEmpty ||
+        username.isEmpty ||
+        password.isEmpty) {
       _showSnackBar('Please fill in all fields.', isError: true);
+      return;
+    }
+
+    final requiresPhone = role == 'rescuer';
+    if (requiresPhone && nationalDigits.isEmpty) {
+      _showSnackBar('Please enter a phone number.', isError: true);
+      return;
+    }
+
+    if (nationalDigits.isNotEmpty &&
+        (phoneE164 == null || nationalDigits.length != 10)) {
+      _showSnackBar(
+        'Enter a valid Philippine mobile number (+63 9XX XXX XXXX).',
+        isError: true,
+      );
+      return;
+    }
+
+    if (!usernameRule.hasMatch(username)) {
+      _showSnackBar(
+        'Username must be 3-32 chars (letters, numbers, dot, underscore, hyphen).',
+        isError: true,
+      );
       return;
     }
 
@@ -67,46 +112,112 @@ class _AccessControlPageState extends State<AccessControlPage> {
     setState(() => _creating = true);
 
     try {
-      // 1. Create auth user via Admin API
-      //    Requires the Supabase client to be initialized with service role key.
-      //    Constructs a system email from username so auth has a valid identifier.
-      final res = await _supabase.auth.admin.createUser(
-        AdminUserAttributes(
-          email: '$username@cebu161.local',
-          password: password,
-          emailConfirm: true,
-          userMetadata: {
-            'username': username,
-            'name': name,
-          },
-        ),
+      final response = await _supabase.functions.invoke(
+        'admin-create-account',
+        body: {
+          'fullName': name,
+          'username': username,
+          'phoneNumber': phoneE164,
+          'password': password,
+          'role': role,
+        },
       );
 
-      final userId = res.user?.id;
-      if (userId == null) throw Exception('User creation returned no ID.');
+      final data = response.data;
+      if (response.status < 200 || response.status >= 300) {
+        _showSnackBar(
+          _adminFacingAccountError(
+            status: response.status,
+            body: data,
+          ),
+          isError: true,
+        );
+        return;
+      }
 
-      // 2. Upsert into profiles table
-      await _supabase.from('profiles').upsert({
-        'id': userId,
-        'username': username,
-        'email': '$username@cebu161.local',
-        'role': _newAccountRole.toLowerCase(), // 'admin' or 'rescuer'
-        'is_on_duty': false,
-      });
-
-      // 3. Clear form
-      _nameCtrl.clear();
+      // Clear form
+      _firstNameCtrl.clear();
+      _middleNameCtrl.clear();
+      _lastNameCtrl.clear();
       _usernameCtrl.clear();
+      _phoneCtrl.clear();
       _passwordCtrl.clear();
 
-      _showSnackBar('Account "$name" created as $_newAccountRole.');
-    } on AuthException catch (e) {
-      _showSnackBar('Auth error: ${e.message}', isError: true);
-    } catch (e) {
-      _showSnackBar('Error: $e', isError: true);
+      _showSnackBar(
+        'Account created successfully.',
+      );
+    } on FunctionException catch (e) {
+      _showSnackBar(
+        _adminFacingAccountError(status: e.status, body: e.details),
+        isError: true,
+      );
+    } catch (_) {
+      _showSnackBar(
+        'Something went wrong. Please try again in a moment.',
+        isError: true,
+      );
     } finally {
       if (mounted) setState(() => _creating = false);
     }
+  }
+
+  /// Maps Edge Function `{ "code": "..." }` (and HTTP status) to admin-facing copy.
+  /// Never surfaces raw backend or database text.
+  String _adminFacingAccountError({required int status, dynamic body}) {
+    String? code;
+    if (body is Map) {
+      final raw = body['code'];
+      if (raw is String && raw.isNotEmpty) code = raw;
+    }
+
+    const byCode = <String, String>{
+      'METHOD_NOT_ALLOWED': 'This action is not available. Please refresh the page.',
+      'NOT_AUTHENTICATED': 'Please sign in again, then retry.',
+      'INVALID_SESSION': 'Your session has expired. Please sign in again.',
+      'FORBIDDEN_NOT_ADMIN': 'You do not have permission to create accounts.',
+      'MALFORMED_REQUEST': 'The request could not be processed. Check your input and try again.',
+      'MISSING_FIELDS': 'Please complete all required fields.',
+      'INVALID_USERNAME': 'Username format is not valid. Use 3–32 letters, numbers, dot, underscore, or hyphen.',
+      'INVALID_PHONE':
+          'Phone number must be a valid Philippine mobile (+63 9XX XXX XXXX).',
+      'INVALID_PASSWORD': 'Password must be at least 6 characters.',
+      'INVALID_ROLE': 'That role cannot be assigned from this screen.',
+      'DUPLICATE_USERNAME':
+          'That username is already in use. Choose a different one.',
+      'DUPLICATE_PHONE':
+          'That phone number is already registered. Use a different number.',
+      // Legacy code (older Edge deployments); treat same as duplicate username.
+      'DUPLICATE_USERNAME_OR_USER_ID':
+          'That username is already in use. Choose a different one.',
+      'ACCOUNT_CREATE_UNAVAILABLE':
+          'The account could not be created right now. Try again later or contact support.',
+      'PROFILE_SYNC_FAILED':
+          'The account was created but could not be finalized. Please contact support.',
+      'SERVICE_UNAVAILABLE':
+          'The service is temporarily unavailable. Please try again shortly.',
+    };
+
+    if (code != null) {
+      final mapped = byCode[code];
+      if (mapped != null) return mapped;
+    }
+
+    if (status == 401) {
+      return byCode['NOT_AUTHENTICATED']!;
+    }
+    if (status == 403) {
+      return byCode['FORBIDDEN_NOT_ADMIN']!;
+    }
+    if (status == 409) {
+      return 'That username or phone number is already in use. Choose a different one.';
+    }
+    if (status == 400) {
+      return 'Some information looks invalid. Please review the form and try again.';
+    }
+    if (status >= 500) {
+      return byCode['SERVICE_UNAVAILABLE']!;
+    }
+    return 'The account could not be created. Please try again.';
   }
 
   void _showSnackBar(String message, {bool isError = false}) {
@@ -223,12 +334,42 @@ class _AccessControlPageState extends State<AccessControlPage> {
                       children: [
                         // Name
                         TextField(
-                          controller: _nameCtrl,
+                          controller: _firstNameCtrl,
                           enabled: !_creating,
                           textInputAction: TextInputAction.next,
                           decoration: InputDecoration(
-                            labelText: 'Full Name',
-                            hintText: 'e.g. Juan Dela Cruz',
+                            labelText: 'First Name',
+                            hintText: 'e.g. Juan',
+                            prefixIcon: const Icon(Icons.badge_outlined),
+                            border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10)),
+                            isDense: true,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+
+                        TextField(
+                          controller: _middleNameCtrl,
+                          enabled: !_creating,
+                          textInputAction: TextInputAction.next,
+                          decoration: InputDecoration(
+                            labelText: 'Middle Name (Optional)',
+                            hintText: 'e.g. Dela',
+                            prefixIcon: const Icon(Icons.badge_outlined),
+                            border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10)),
+                            isDense: true,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+
+                        TextField(
+                          controller: _lastNameCtrl,
+                          enabled: !_creating,
+                          textInputAction: TextInputAction.next,
+                          decoration: InputDecoration(
+                            labelText: 'Last Name',
+                            hintText: 'e.g. Cruz',
                             prefixIcon: const Icon(Icons.badge_outlined),
                             border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(10)),
@@ -247,6 +388,58 @@ class _AccessControlPageState extends State<AccessControlPage> {
                             labelText: 'Username',
                             hintText: 'e.g. jdelacruz',
                             prefixIcon: const Icon(Icons.person_outline),
+                            border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10)),
+                            isDense: true,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+
+                        // Phone (+63 national segment: 9XX XXX XXXX)
+                        TextField(
+                          controller: _phoneCtrl,
+                          enabled: !_creating,
+                          keyboardType: TextInputType.phone,
+                          textInputAction: TextInputAction.next,
+                          inputFormatters: [
+                            PhilippineNationalMobileInputFormatter(),
+                          ],
+                          decoration: InputDecoration(
+                            labelText: 'Phone Number',
+                            hintText: '9XX XXX XXXX',
+                            prefixIcon: Padding(
+                              padding: const EdgeInsetsDirectional.only(
+                                start: 12,
+                                end: 4,
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Text(
+                                    '🇵🇭',
+                                    style: TextStyle(fontSize: 18),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    '+63',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      color: Colors.blueGrey.shade800,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Container(
+                                    width: 1,
+                                    height: 22,
+                                    color: Colors.black.withValues(alpha: 0.15),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            prefixIconConstraints: const BoxConstraints(
+                              minWidth: 108,
+                              minHeight: 48,
+                            ),
                             border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(10)),
                             isDense: true,
@@ -348,7 +541,7 @@ class _AccessControlPageState extends State<AccessControlPage> {
                             const SizedBox(width: 4),
                             Expanded(
                               child: Text(
-                                'Requires Supabase client initialized with service role key.',
+                                'Staff accounts are created through a secure admin process.',
                                 style: TextStyle(
                                     fontSize: 11,
                                     color: Colors.blueGrey.shade400),
