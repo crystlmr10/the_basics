@@ -30,6 +30,7 @@ class SosDispatch {
   final DateTime? acceptedAt;
   final DateTime? enRouteAt;
   final DateTime? closedAt;
+  final bool adminCancelled;
 
   const SosDispatch({
     required this.id,
@@ -50,6 +51,7 @@ class SosDispatch {
     this.acceptedAt,
     this.enRouteAt,
     this.closedAt,
+    this.adminCancelled = false,
   });
 
   String get displayName => userName ?? userEmail ?? userId.substring(0, 8);
@@ -102,6 +104,7 @@ class SosDispatch {
       closedAt: m['closed_at'] != null
           ? DateTime.parse(m['closed_at'] as String).toLocal()
           : null,
+      adminCancelled: m['admin_cancelled'] == true,
     );
   }
 }
@@ -215,10 +218,10 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
 
   bool _loading = true;
   bool _assigning = false;
+  String? _cancellingIncidentId;
   String? _error;
 
   // UI state
-  final Map<String, String> _assignedRescuerByIncidentId = {};
   final Map<String, String> _queueNoticeByIncidentId = {};
   String? _expandedIncidentId;
   String? _selectedRescuerIdForExpandedIncident;
@@ -258,6 +261,26 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
     }
   }
 
+  /// Mission phase: rescuer counts as On-Mission and is excluded from new dispatch picks.
+  bool _isMissionStatus(String status) {
+    switch (status.trim().toLowerCase()) {
+      case 'dispatching':
+      case 'en_route':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool _rescuerIsOnMission(String rescuerId) {
+    return _incidents.any(
+      (i) =>
+          i.assignedRescuerId == rescuerId &&
+          i.assignedRescuerId != null &&
+          _isMissionStatus(i.status),
+    );
+  }
+
   Future<void> _loadAll() async {
     setState(() {
       _loading = true;
@@ -294,12 +317,8 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
       setState(() {
         _incidents = activeList;
         _incidentHistory = list;
-        // Sync assignment map from DB
-        for (final inc in list) {
-          if (inc.assignedRescuerId != null) {
-            _assignedRescuerByIncidentId[inc.id] = inc.assignedRescuerId!;
-          }
-        }
+        final activeIds = activeList.map((e) => e.id).toSet();
+        _queueNoticeByIncidentId.removeWhere((id, _) => !activeIds.contains(id));
       });
       _emitQueueWorkflowUpdates(previousById, list);
     }
@@ -354,42 +373,82 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
   // ── Actions ─────────────────────────────────────────────────────────────────
 
   Future<void> _assignRescuer(String incidentId) async {
+    final incident = _incidents.where((i) => i.id == incidentId).firstOrNull;
+    if (incident == null) return;
+
+    final options = _rescuersForIncidentDispatch(incident);
     final rescuerId = _selectedRescuerIdForExpandedIncident;
-    if (rescuerId == null) return;
+    final hasValidSelection = rescuerId != null &&
+        options.candidates.any((c) => c.rescuer.id == rescuerId);
+    if (!hasValidSelection) {
+      if (mounted) {
+        setState(() {
+          _selectedRescuerIdForExpandedIncident =
+              options.candidates.firstOrNull?.rescuer.id;
+        });
+        _notifyRealtimeEvent(
+          'Rescuer list updated. Please confirm the selected rescuer again.',
+          color: Colors.orange.shade800,
+        );
+      }
+      return;
+    }
 
     setState(() => _assigning = true);
 
     try {
-      final updatedRows = await _supabase
-          .from('sos_dispatches')
-          .update({
-            'assigned_rescuer_id': rescuerId,
-            'status': 'dispatching',
-          })
-          .eq('id', incidentId)
-          .isFilter('assigned_rescuer_id', null)
-          .inFilter('status', ['submitted', 'received'])
-          .select('id');
-
-      if (updatedRows.isEmpty) {
-        _notifyRealtimeEvent(
-          'Request already accepted by rescuer. Assignment was not changed.',
-          color: Colors.orange.shade800,
-        );
-        if (mounted) {
-          setState(() {
-            _queueNoticeByIncidentId[incidentId] =
-                'A rescuer already accepted this request.';
-            _expandedIncidentId = null;
-            _selectedRescuerIdForExpandedIncident = null;
-          });
+      final rpcRes = await _supabase.rpc(
+        'admin_assign_sos_dispatch',
+        params: {
+          'p_dispatch_id': incidentId,
+          'p_rescuer_id': rescuerId,
+        },
+      );
+      final map = rpcRes is Map
+          ? Map<String, dynamic>.from(rpcRes)
+          : <String, dynamic>{};
+      final ok = map['ok'] == true;
+      if (!ok) {
+        final err = (map['error'] ?? '').toString().trim().toLowerCase();
+        if (err == 'already_assigned') {
+          _notifyRealtimeEvent(
+            'Request already accepted by rescuer. Assignment was not changed.',
+            color: Colors.orange.shade800,
+          );
+          if (mounted) {
+            setState(() {
+              _queueNoticeByIncidentId[incidentId] =
+                  'A rescuer already accepted this request.';
+              _expandedIncidentId = null;
+              _selectedRescuerIdForExpandedIncident = null;
+            });
+          }
+          await _loadIncidents();
+          return;
         }
-        await _loadIncidents();
+        if (err == 'rescuer_busy') {
+          _notifyRealtimeEvent(
+            '${_rescuerNameById(rescuerId)} already has an active SOS.',
+            color: Colors.orange.shade800,
+          );
+          return;
+        }
+        if (err == 'dispatch_closed') {
+          _notifyRealtimeEvent(
+            'This request is already closed.',
+            color: Colors.orange.shade800,
+          );
+          await _loadIncidents();
+          return;
+        }
+        _notifyRealtimeEvent(
+          'Failed to assign rescuer: ${err.isEmpty ? 'unknown error' : err}',
+          color: Colors.red,
+        );
         return;
       }
 
       setState(() {
-        _assignedRescuerByIncidentId[incidentId] = rescuerId;
         _queueNoticeByIncidentId[incidentId] =
             'Admin assigned ${_rescuerNameById(rescuerId)}.';
         _expandedIncidentId = null;
@@ -413,6 +472,81 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
       }
     } finally {
       if (mounted) setState(() => _assigning = false);
+    }
+  }
+
+  Future<void> _confirmAndCancelSos(SosDispatch inc) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel SOS report?'),
+        content: Text(
+          'Are you sure you want to cancel ${inc.ticketNumber}? '
+          'It will be closed and appear in SOS History as cancelled.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('No'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Yes'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
+    setState(() => _cancellingIncidentId = inc.id);
+    try {
+      final rpcRes = await _supabase.rpc(
+        'admin_cancel_sos_dispatch',
+        params: {'p_dispatch_id': inc.id},
+      );
+      final map = rpcRes is Map
+          ? Map<String, dynamic>.from(rpcRes)
+          : <String, dynamic>{};
+      final ok = map['ok'] == true;
+      if (!ok) {
+        final err = (map['error'] ?? '').toString().trim().toLowerCase();
+        if (err == 'dispatch_already_closed') {
+          _notifyRealtimeEvent(
+            'This request is already closed.',
+            color: Colors.orange.shade800,
+          );
+        } else if (err == 'forbidden' || err == 'not_authenticated') {
+          _notifyRealtimeEvent(
+            'You are not allowed to cancel this request.',
+            color: Colors.red,
+          );
+        } else {
+          _notifyRealtimeEvent(
+            'Could not cancel: ${err.isEmpty ? 'unknown error' : err}',
+            color: Colors.red,
+          );
+        }
+        await _loadIncidents();
+        return;
+      }
+      if (mounted) {
+        setState(() {
+          _expandedIncidentId = null;
+          _selectedRescuerIdForExpandedIncident = null;
+          _queueNoticeByIncidentId.remove(inc.id);
+        });
+        _notifyRealtimeEvent(
+          '${inc.ticketNumber} closed (cancelled).',
+          color: Colors.deepOrange.shade700,
+        );
+      }
+      await _loadAll();
+    } catch (e) {
+      if (mounted) {
+        _notifyRealtimeEvent('Failed to cancel: $e', color: Colors.red);
+      }
+    } finally {
+      if (mounted) setState(() => _cancellingIncidentId = null);
     }
   }
 
@@ -443,7 +577,7 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
   _RescuerSearchResult _rescuersForIncidentDispatch(SosDispatch incident) {
     final available = _rescuers.where((r) =>
         r.isOnDuty &&
-        !_assignedRescuerByIncidentId.values.contains(r.id) &&
+        !_rescuerIsOnMission(r.id) &&
         r.lastLatitude != null &&
         r.lastLongitude != null);
 
@@ -542,8 +676,15 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
           _notifyRealtimeEvent('$phase: ${next.ticketNumber}', color: Colors.teal);
         } else if (next.status == 'closed') {
           setState(() => _queueNoticeByIncidentId.remove(next.id));
-          _notifyRealtimeEvent('${next.ticketNumber} is now closed.',
-              color: Colors.green.shade700);
+          if (next.adminCancelled) {
+            _notifyRealtimeEvent(
+              '${next.ticketNumber} closed (cancelled by admin).',
+              color: Colors.deepOrange.shade700,
+            );
+          } else {
+            _notifyRealtimeEvent('${next.ticketNumber} is now closed.',
+                color: Colors.green.shade700);
+          }
         } else {
           _notifyRealtimeEvent(
             '${next.ticketNumber} status updated to $phase',
@@ -557,7 +698,8 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
   List<Polyline> _activeMissionsPolylines() {
     final polylines = <Polyline>[];
     for (final inc in _incidents) {
-      final rescuerId = _assignedRescuerByIncidentId[inc.id];
+      if (!_isMissionStatus(inc.status)) continue;
+      final rescuerId = inc.assignedRescuerId;
       if (rescuerId == null) continue;
       final matches = _rescuers.where((r) => r.id == rescuerId);
       if (matches.isEmpty) continue;
@@ -736,8 +878,7 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
                                         itemBuilder: (context, i) {
                                           final inc = _incidents[i];
                                           final assignedRescuerId =
-                                              _assignedRescuerByIncidentId[
-                                                  inc.id];
+                                              inc.assignedRescuerId;
                                           final assignedRescuer = _rescuers
                                               .where((r) =>
                                                   r.id == assignedRescuerId)
@@ -801,6 +942,10 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
                                                   inc.longitude),
                                               15.0,
                                             ),
+                                            onCancel: () =>
+                                                _confirmAndCancelSos(inc),
+                                            cancelling:
+                                                _cancellingIncidentId == inc.id,
                                             formatDateTime: _formatDateTime,
                                           );
                                         },
@@ -876,9 +1021,7 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
                                           ],
                                           rows: _rescuers.map((r) {
                                             final isAssigned =
-                                                _assignedRescuerByIncidentId
-                                                    .values
-                                                    .contains(r.id);
+                                                _rescuerIsOnMission(r.id);
                                             final statusLabel = isAssigned
                                                 ? 'On-Mission'
                                                 : r.isOnDuty
@@ -1081,9 +1224,23 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
         final rescuer = _rescuers
             .where((r) => r.id == incident.assignedRescuerId)
             .firstOrNull;
-        final statusBadge = _formatSosDispatchStatusForBadge(incident.status);
+        final statusBadge = _sosHistoryStatusBadgeText(incident);
+        final st = incident.status.trim().toLowerCase();
+        final cancelled = st == 'closed' && incident.adminCancelled;
+        final Color pillBg;
+        final Color pillFg;
+        if (cancelled) {
+          pillBg = Colors.deepOrange.withValues(alpha: 0.12);
+          pillFg = Colors.deepOrange.shade800;
+        } else if (st == 'closed') {
+          pillBg = Colors.green.withValues(alpha: 0.12);
+          pillFg = Colors.green.shade700;
+        } else {
+          pillBg = Colors.orange.withValues(alpha: 0.12);
+          pillFg = Colors.orange.shade800;
+        }
         final closedAt = incident.closedAt ??
-            (incident.status == 'closed' ? incident.updatedAt : null);
+            (st == 'closed' ? incident.updatedAt : null);
         return Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
@@ -1109,9 +1266,7 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
-                      color: incident.status == 'closed'
-                          ? Colors.green.withValues(alpha: 0.12)
-                          : Colors.orange.withValues(alpha: 0.12),
+                      color: pillBg,
                       borderRadius: BorderRadius.circular(999),
                     ),
                     child: Text(
@@ -1119,9 +1274,7 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
                       style: TextStyle(
                         fontWeight: FontWeight.w800,
                         fontSize: 11,
-                        color: incident.status == 'closed'
-                            ? Colors.green.shade700
-                            : Colors.orange.shade800,
+                        color: pillFg,
                       ),
                     ),
                   ),
@@ -1174,6 +1327,15 @@ String _formatSosDispatchStatusForBadge(String? raw) {
         return '${lower[0].toUpperCase()}${lower.substring(1)}';
       })
       .join(' ');
+}
+
+/// History pill: distinguish admin-cancelled closures from normal closed.
+String _sosHistoryStatusBadgeText(SosDispatch inc) {
+  final st = inc.status.trim().toLowerCase();
+  if (st == 'closed' && inc.adminCancelled) {
+    return 'Closed (Cancelled)';
+  }
+  return _formatSosDispatchStatusForBadge(inc.status);
 }
 
 class _SosPinHeaderIcon extends StatelessWidget {
@@ -1279,6 +1441,8 @@ class _IncidentCard extends StatelessWidget {
   final ValueChanged<String?> onRescuerSelected;
   final VoidCallback onAssign;
   final VoidCallback onLocate;
+  final VoidCallback onCancel;
+  final bool cancelling;
   final String Function(DateTime) formatDateTime;
 
   const _IncidentCard({
@@ -1297,12 +1461,24 @@ class _IncidentCard extends StatelessWidget {
     required this.onRescuerSelected,
     required this.onAssign,
     required this.onLocate,
+    required this.onCancel,
+    required this.cancelling,
     required this.formatDateTime,
   });
 
   @override
   Widget build(BuildContext context) {
     final isAssigned = assignedRescuerId != null;
+    final uniqueRescuersById = <String, _RescuerCandidate>{};
+    for (final candidate in rescuers) {
+      uniqueRescuersById.putIfAbsent(candidate.rescuer.id, () => candidate);
+    }
+    final uniqueRescuers = uniqueRescuersById.values.toList();
+    final safeSelectedRescuerId =
+        (selectedRescuerId != null &&
+                uniqueRescuers.any((r) => r.rescuer.id == selectedRescuerId))
+            ? selectedRescuerId
+            : null;
     final phoneRaw = incident.callerPhone?.trim();
     final phoneDisplay =
         (phoneRaw != null && phoneRaw.isNotEmpty) ? phoneRaw : '—';
@@ -1462,11 +1638,46 @@ class _IncidentCard extends StatelessWidget {
                 ),
               ],
             ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: (cancelling || (assigning && isExpanded))
+                    ? null
+                    : onCancel,
+                icon: cancelling
+                    ? SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.red.shade700,
+                        ),
+                      )
+                    : Icon(Icons.cancel_outlined,
+                        size: 16, color: Colors.red.shade700),
+                label: Text(
+                  cancelling ? 'Cancelling…' : 'Cancel',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    color: Colors.red.shade700,
+                  ),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.red.shade700,
+                  side: BorderSide(color: Colors.red.shade300),
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ),
 
             // ── Rescuer selector (expanded)
             if (isExpanded) ...[
               const SizedBox(height: 10),
-              if (rescuers.isEmpty)
+              if (uniqueRescuers.isEmpty)
                 Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
@@ -1526,11 +1737,11 @@ class _IncidentCard extends StatelessWidget {
                   ),
                   child: DropdownButtonHideUnderline(
                     child: DropdownButton<String>(
-                      key: ValueKey(selectedRescuerId),
-                      value: selectedRescuerId,
+                      key: ValueKey('${incident.id}:$safeSelectedRescuerId'),
+                      value: safeSelectedRescuerId,
                       isExpanded: true,
                       isDense: true,
-                      items: rescuers
+                      items: uniqueRescuers
                           .map((r) => DropdownMenuItem(
                                 value: r.rescuer.id,
                                 child: Text(

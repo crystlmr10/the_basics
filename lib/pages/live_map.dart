@@ -499,21 +499,90 @@ class _LiveMapViewState extends State<LiveMapView> {
     );
   }
 
+  String? _reportImageUrl(Map<String, dynamic> report) {
+    final raw = report['image_url'] ?? report['imageUrl'];
+    final s = raw?.toString().trim() ?? '';
+    return s.isEmpty ? null : s;
+  }
+
   // ── Admin dialog ──────────────────────────────────────────────────────────
   void _showAdminActionDialog(Map<String, dynamic> report) {
+    final imageUrl = _reportImageUrl(report);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Verify Report'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Location: ${report['location_name'] ?? 'Unknown'}'),
-            const SizedBox(height: 4),
-            Text('Current: ${report['admin_decision'] ?? 'Pending'}',
-                style: const TextStyle(fontSize: 12, color: Colors.grey)),
-          ],
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Location: ${report['location_name'] ?? 'Unknown'}'),
+                const SizedBox(height: 4),
+                Text(
+                  'Current: ${report['admin_decision'] ?? 'Pending'}',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+                if (imageUrl != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    'Uploaded photo',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 12,
+                      color: Colors.blueGrey.shade800,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Image.network(
+                      imageUrl,
+                      width: double.infinity,
+                      fit: BoxFit.fitWidth,
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return Container(
+                          height: 160,
+                          alignment: Alignment.center,
+                          color: Colors.blueGrey.withValues(alpha: 0.06),
+                          child: const SizedBox(
+                            width: 28,
+                            height: 28,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                        );
+                      },
+                      errorBuilder: (_, __, ___) => Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        color: Colors.blueGrey.withValues(alpha: 0.1),
+                        child: Row(
+                          children: [
+                            Icon(Icons.broken_image_outlined,
+                                color: Colors.blueGrey.shade600),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Could not load image.',
+                                style: TextStyle(
+                                  color: Colors.blueGrey.shade700,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
