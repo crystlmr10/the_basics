@@ -51,7 +51,6 @@ class _HistoricalLogsPageState extends State<HistoricalLogsPage> {
   static const List<String> _preferredSensorOrder = [
     'LORA-MASTER-TAB',
     'LORA-TABUNOC-MB',
-    'LORA-LINAO',
   ];
 
   @override

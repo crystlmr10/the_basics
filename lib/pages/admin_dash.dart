@@ -5,7 +5,6 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:simple_animations/simple_animations.dart';
 
 import 'live_map.dart' as live;
-import 'sensor_network.dart' as sn;
 import 'historical_logs.dart';
 import 'users_reports.dart';
 import 'rescue_center.dart';
@@ -42,10 +41,38 @@ class _AdminDashboardState extends State<AdminDashboard> {
       .stream(primaryKey: ['id'])
       .order('created_at', ascending: true);
 
+  final Stream<List<Map<String, dynamic>>> _reportsStream = Supabase.instance.client
+      .from('user_reports')
+      .stream(primaryKey: ['id']);
+
+  static bool _isReportActive(Map<String, dynamic> r) {
+    final raw = r['created_at'] ?? r['reported_at'];
+    if (raw == null) return true;
+    try {
+      final t = DateTime.parse(raw.toString()).toUtc();
+      return DateTime.now().toUtc().difference(t) <= const Duration(hours: 5);
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Color _getDecisionColor(String? decision) {
+    final d = (decision ?? '').toLowerCase();
+    if (d.contains('impassable')) return Colors.red;
+    if (d.contains('risky')) return Colors.orange;
+    return Colors.blue;
+  }
+
+  static double _safeDouble(dynamic v, {double d = 0.0}) {
+    if (v == null) return d;
+    if (v is num) return v.toDouble();
+    return double.tryParse(v.toString()) ?? d;
+  }
+
   @override
   void initState() {
     super.initState();
-    _selectedIndex = widget.initialIndex.clamp(0, 7);
+    _selectedIndex = widget.initialIndex.clamp(0, 6);
   }
 
   @override
@@ -68,7 +95,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
             destinations: const [
               NavigationRailDestination(icon: Icon(Icons.grid_view), label: Text("Dashboard")),
               NavigationRailDestination(icon: Icon(Icons.map_outlined), label: Text("Live Map View")),
-              NavigationRailDestination(icon: Icon(Icons.sensors), label: Text("Sensor Network")),
               NavigationRailDestination(icon: Icon(Icons.history), label: Text("Historical Data Logs")),
               NavigationRailDestination(icon: Icon(Icons.assignment_ind_outlined), label: Text("Users and Reports")),
               NavigationRailDestination(icon: _RescuePersonShadowNavIcon(), label: Text("Rescue Center")),
@@ -96,7 +122,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     children: [
                       _buildDashboardContent(),
                       const live.LiveMapView(),
-                      const sn.SensorNetworkPage(),
                       const HistoricalLogsPage(),
                       const AdminUserManagementPage(),
                       RescueCenterPage(settings: widget.settings),
@@ -176,13 +201,21 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   ],
                 ),
                 const SizedBox(height: 24),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(flex: 2, child: _buildMapCard(latestBySensor)),
-                    const SizedBox(width: 24),
-                    Expanded(flex: 1, child: _buildRecentEventsCard(allLogs)),
-                  ],
+                StreamBuilder<List<Map<String, dynamic>>>(
+                  stream: _reportsStream,
+                  builder: (context, reportSnap) {
+                    final userReports = (reportSnap.data ?? [])
+                        .where(_isReportActive)
+                        .toList();
+                    return Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(flex: 2, child: _buildMapCard(latestBySensor, userReports)),
+                        const SizedBox(width: 24),
+                        Expanded(flex: 1, child: _buildRecentEventsCard(latestBySensor)),
+                      ],
+                    );
+                  },
                 ),
               ],
             ),
@@ -229,31 +262,37 @@ class _AdminDashboardState extends State<AdminDashboard> {
     ];
   }
 
-  Widget _buildMapCard(Map<String, Map<String, dynamic>> latestNodes) {
-    // sensor_id values must match exactly what the Arduino nodes push to Supabase:
-    //   LORA-LINAO        → Linao node
-    //   LORA-MASTER-TAB   → Master / Tabunok Golden FUS node
-    //   LORA-TABUNOC-MB   → Tabunok Metrobank node
+  Widget _buildMapCard(
+    Map<String, Map<String, dynamic>> latestNodes,
+    List<Map<String, dynamic>> userReports,
+  ) {
     final List<Map<String, dynamic>> nodeMap = [
-      {'name': 'Linao, Talisay',       'sensorId': 'LORA-LINAO',       'coords': linaoCoords},
-      {'name': 'Tabunok – Golden FUS', 'sensorId': 'LORA-MASTER-TAB',  'coords': goldenFuCoords},
-      {'name': 'Tabunok – Metrobank',  'sensorId': 'LORA-TABUNOC-MB',  'coords': metrobankCoords},
+      {'name': 'Linao, Talisay', 'sensorId': 'LORA-LINAO',      'coords': linaoCoords},
+      {'name': 'Tabunoc',        'sensorId': 'LORA-MASTER-TAB', 'coords': goldenFuCoords},
+      {'name': 'Tabunoc – MB',   'sensorId': 'LORA-TABUNOC-MB', 'coords': metrobankCoords},
     ];
 
-    // Build heatmap circles for every node based on its current status
+    // Heatmap rings — sensor alerts
     final List<CircleMarker> heatCircles = [];
     for (final node in nodeMap) {
       final data = latestNodes[node['sensorId'] as String];
-
-      final String status = (data?['status'] ?? '').toString().toLowerCase();
+      final String s = (data?['status'] ?? '').toString().toLowerCase();
       final LatLng coords = node['coords'] as LatLng;
-
-      if (status.contains('severe') || status.contains('impassable')) {
+      if (s.contains('severe') || s.contains('impassable')) {
         heatCircles.addAll(_heatRings(coords, Colors.red, severe: true));
-      } else if (status.contains('risky') || status.contains('warning')) {
+      } else if (s.contains('risky') || s.contains('warning')) {
         heatCircles.addAll(_heatRings(coords, Colors.orange, severe: false));
       }
-      // Normal / no data → no halo
+    }
+    // Heatmap rings — user report decisions
+    for (final r in userReports) {
+      final pt = LatLng(_safeDouble(r['latitude']), _safeDouble(r['longitude']));
+      final d = (r['admin_decision'] ?? '').toString().toLowerCase();
+      if (d == 'impassable') {
+        heatCircles.addAll(_heatRings(pt, Colors.red, severe: true));
+      } else if (d == 'risky') {
+        heatCircles.addAll(_heatRings(pt, Colors.orange, severe: false));
+      }
     }
 
     return Container(
@@ -287,51 +326,33 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   initialZoom: 14,
                 ),
                 children: [
-                  TileLayer(
-                    urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                  ),
-
-                  // ── Heatmap: stacked concentric rings ─────────────────
+                  TileLayer(urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'),
                   CircleLayer(circles: heatCircles),
-
-                  // ── Node pin markers ──────────────────────────────────
+                  // User report warning markers only (same as live map)
                   MarkerLayer(
-                    markers: nodeMap.map((node) {
-                      final data = latestNodes[node['sensorId'] as String];
-
-                      final double cm =
-                          (data?['water_level_cm'] as num? ?? 0).toDouble();
-                      final String status =
-                          (data?['status'] ?? "No Data").toString();
-                      final Color pinColor =
-                          data != null ? _getFloodColor(status) : Colors.grey;
-
+                    markers: userReports.map((r) {
+                      final String decision = (r['admin_decision'] ?? 'Pending').toString();
+                      final Color iconColor = _getDecisionColor(decision);
                       return Marker(
-                        point: node['coords'] as LatLng,
+                        point: LatLng(_safeDouble(r['latitude']), _safeDouble(r['longitude'])),
                         width: 140,
                         height: 70,
                         child: Column(
                           children: [
                             Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 4, vertical: 2),
+                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                               decoration: BoxDecoration(
                                 color: Colors.white,
                                 borderRadius: BorderRadius.circular(4),
-                                boxShadow: const [
-                                  BoxShadow(blurRadius: 2, color: Colors.black26)
-                                ],
+                                boxShadow: const [BoxShadow(blurRadius: 2, color: Colors.black26)],
                               ),
                               child: Text(
-                                data != null
-                                    ? "${node['name']}\n$status: ${cm}cm"
-                                    : node['name'] as String,
+                                "${r['location_name'] ?? 'Report'}\n$decision",
                                 textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                    fontSize: 7, fontWeight: FontWeight.bold),
+                                style: const TextStyle(fontSize: 7, fontWeight: FontWeight.bold),
                               ),
                             ),
-                            Icon(Icons.location_on, color: pinColor, size: 35),
+                            Icon(Icons.warning, color: iconColor, size: 35),
                           ],
                         ),
                       );
@@ -346,8 +367,17 @@ class _AdminDashboardState extends State<AdminDashboard> {
     );
   }
 
-  Widget _buildRecentEventsCard(List<Map<String, dynamic>> logs) {
-    final recentLogs = logs.reversed.take(10).toList();
+  Widget _buildRecentEventsCard(Map<String, Map<String, dynamic>> latestBySensor) {
+    int severity(String status) {
+      final s = status.toLowerCase();
+      if (s.contains('severe') || s.contains('impassable')) return 2;
+      if (s.contains('risky') || s.contains('warning')) return 1;
+      return 0;
+    }
+
+    final nodes = latestBySensor.values.toList()
+      ..sort((a, b) => severity((b['status'] ?? '').toString())
+          .compareTo(severity((a['status'] ?? '').toString())));
 
     return Container(
       height: 450,
@@ -360,30 +390,38 @@ class _AdminDashboardState extends State<AdminDashboard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Row(children: [
-            Icon(Icons.access_time, size: 18),
+            Icon(Icons.sensors, size: 18),
             SizedBox(width: 8),
-            Text("Recent Sensor Events",
+            Text("Current Sensor Status",
                 style: TextStyle(fontWeight: FontWeight.bold)),
           ]),
           const Divider(),
           Expanded(
-            child: recentLogs.isEmpty
+            child: nodes.isEmpty
                 ? const Center(
-                    child: Text("No Sensor Events Found",
+                    child: Text("No sensor data found",
                         style: TextStyle(color: Colors.grey)))
                 : ListView.builder(
-                    itemCount: recentLogs.length,
+                    itemCount: nodes.length,
                     itemBuilder: (context, i) {
-                      final log = recentLogs[i];
+                      final log = nodes[i];
                       final double cm =
                           (log['water_level_cm'] as num? ?? 0).toDouble();
-                      final String status = log['status'] ?? "Normal";
-                      final String sensor = log['sensor_id'] ?? "Unknown";
+                      final String status = log['status'] ?? 'Normal';
+                      final String sensor = log['sensor_id'] ?? 'Unknown';
+                      final String? createdAt = log['created_at']?.toString();
+                      final DateTime? ts = createdAt != null
+                          ? DateTime.tryParse(createdAt)
+                          : null;
+                      String two(int v) => v.toString().padLeft(2, '0');
+                      final timeLabel = ts != null
+                          ? '${two(ts.hour)}:${two(ts.minute)} ${two(ts.month)}/${two(ts.day)}'
+                          : 'LIVE';
                       return _EventItem(
                         tag: "[$sensor]",
-                        time: "LIVE",
+                        time: timeLabel,
                         color: _getFloodColor(status),
-                        message: "Water Level: ${cm}cm",
+                        message: "Water Level: ${cm.toStringAsFixed(1)} cm",
                         subMessage: "Status: $status",
                       );
                     },

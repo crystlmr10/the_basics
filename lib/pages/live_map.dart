@@ -93,7 +93,7 @@ class _LiveMapViewState extends State<LiveMapView> {
       pos  = linaoCoords;
     } else if (idUp.contains('MASTER') || idUp.contains('GOLDEN') ||
                (idUp.contains('TABUNOC') && !idUp.contains('MB'))) {
-      name = 'Tabunok – Golden FUS';
+      name = 'Tabunoc';
       pos  = goldenFuCoords;
     } else if (idUp.contains('MB') || idUp.contains('METROBANK')) {
       name = 'Tabunok – Metrobank';
@@ -293,47 +293,9 @@ class _LiveMapViewState extends State<LiveMapView> {
                                   // Heatmap rings
                                   CircleLayer(circles: heatCircles),
 
-                                  // Labeled pin markers — sensor nodes
+                                  // Only user report markers — sensor nodes are shown in Sensor Network
                                   MarkerLayer(
                                     markers: [
-                                      ...sensors.map((s) {
-                                        final e = _getEnhancedSensorData(s);
-                                        final double cm = _safeDouble(s['water_level_cm']);
-                                        final String status = (s['status'] ?? 'No Data').toString();
-                                        final Color pinColor = _getStatusColor(status);
-
-                                        return Marker(
-                                          point: LatLng(e['latitude'], e['longitude']),
-                                          width: 140,
-                                          height: 70,
-                                          child: GestureDetector(
-                                            onTap: () => _onNodeSelected(s),
-                                            child: Column(
-                                              children: [
-                                                Container(
-                                                  padding: const EdgeInsets.symmetric(
-                                                      horizontal: 4, vertical: 2),
-                                                  decoration: BoxDecoration(
-                                                    color: Colors.white,
-                                                    borderRadius: BorderRadius.circular(4),
-                                                    boxShadow: const [
-                                                      BoxShadow(blurRadius: 2, color: Colors.black26),
-                                                    ],
-                                                  ),
-                                                  child: Text(
-                                                    "${e['display_name']}\n$status: ${cm.toStringAsFixed(0)}cm",
-                                                    textAlign: TextAlign.center,
-                                                    style: const TextStyle(
-                                                        fontSize: 7, fontWeight: FontWeight.bold),
-                                                  ),
-                                                ),
-                                                Icon(Icons.location_on, color: pinColor, size: 35),
-                                              ],
-                                            ),
-                                          ),
-                                        );
-                                      }),
-
                                       // User report markers
                                       ...userReports.map((r) {
                                         final String decision = (r['admin_decision'] ?? 'Pending').toString();
