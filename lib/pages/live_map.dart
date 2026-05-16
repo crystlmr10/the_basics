@@ -16,6 +16,8 @@ class _LiveMapViewState extends State<LiveMapView> {
 
   Map<String, dynamic>? _selectedNode;
   Map<String, Map<String, dynamic>> _sensorMeta = {};
+  String? _moderatingReportId;
+  String? _moderatingSensorKey;
 
   static const LatLng linaoCoords     = LatLng(10.257778, 123.817528);
   static const LatLng goldenFuCoords  = LatLng(10.264846, 123.840291);
@@ -54,6 +56,60 @@ class _LiveMapViewState extends State<LiveMapView> {
     } catch (_) {
       return true;
     }
+  }
+
+  bool _isReportVisible(Map<String, dynamic> report) {
+    final deletedAt = report['deleted_at'];
+    if (deletedAt != null && deletedAt.toString().trim().isNotEmpty) {
+      return false;
+    }
+    return _isReportActive(report);
+  }
+
+  bool _isSensorAlertStatus(String status) {
+    final s = status.toLowerCase();
+    return s.contains('impassable') ||
+        s.contains('severe') ||
+        s.contains('flooding') ||
+        s.contains('risky') ||
+        s.contains('warning');
+  }
+
+  DateTime? _parseAsUtc(dynamic value) {
+    if (value == null) return null;
+    final parsed = DateTime.tryParse(value.toString());
+    return parsed?.toUtc();
+  }
+
+  String _sensorDismissKey(String sensorId, String status, DateTime eventTimeUtc) {
+    return '${sensorId.trim().toLowerCase()}|${status.trim().toLowerCase()}|${eventTimeUtc.toIso8601String()}';
+  }
+
+  Set<String> _dismissedSensorKeys(List<Map<String, dynamic>> rows) {
+    final out = <String>{};
+    for (final row in rows) {
+      final sensorId = (row['sensor_id'] ?? '').toString().trim();
+      final status = (row['sensor_status'] ?? '').toString().trim();
+      final eventTime = _parseAsUtc(row['sensor_event_time']);
+      if (sensorId.isEmpty || status.isEmpty || eventTime == null) continue;
+      out.add(_sensorDismissKey(sensorId, status, eventTime));
+    }
+    return out;
+  }
+
+  List<Map<String, dynamic>> _filterVisibleSensors(
+    List<Map<String, dynamic>> sensors,
+    Set<String> dismissedKeys,
+  ) {
+    return sensors.where((sensor) {
+      final sensorId = (sensor['sensor_id'] ?? '').toString().trim();
+      final status = (sensor['status'] ?? '').toString().trim().toLowerCase();
+      if (sensorId.isEmpty || !_isSensorAlertStatus(status)) return true;
+      final eventTime = _parseAsUtc(sensor['created_at']);
+      if (eventTime == null) return true;
+      final key = _sensorDismissKey(sensorId, status, eventTime);
+      return !dismissedKeys.contains(key);
+    }).toList();
   }
 
   Color _getStatusColor(String status) {
@@ -165,39 +221,49 @@ class _LiveMapViewState extends State<LiveMapView> {
                           .from('user_reports')
                           .stream(primaryKey: ['id']),
                       builder: (context, reportSnapshot) {
-                        final sensors = _getUniqueSensors(sensorSnapshot.data ?? []);
-                        final reports = (reportSnapshot.data ?? [])
-                            .where(_isReportActive)
-                            .toList();
+                        return StreamBuilder<List<Map<String, dynamic>>>(
+                          stream: Supabase.instance.client
+                              .from('sensor_alert_dismissals')
+                              .stream(primaryKey: ['id'])
+                              .order('dismissed_at', ascending: false),
+                          builder: (context, dismissSnapshot) {
+                            final sensors = _getUniqueSensors(sensorSnapshot.data ?? []);
+                            final dismissed = _dismissedSensorKeys(dismissSnapshot.data ?? []);
+                            final visibleSensors = _filterVisibleSensors(sensors, dismissed);
+                            final reports = (reportSnapshot.data ?? [])
+                                .where(_isReportVisible)
+                                .toList();
 
-                        return ListView(
-                          children: [
-                            const _SectionHeader(title: 'LIVE SENSOR NODES'),
-                            if (sensors.isEmpty)
-                              const Padding(
-                                padding: EdgeInsets.all(20),
-                                child: Text('Searching for sensor data...',
-                                    style: TextStyle(fontSize: 12, color: Colors.grey)),
-                              ),
-                            ...sensors.map((s) => _buildSensorTile(s)),
+                            return ListView(
+                              children: [
+                                const _SectionHeader(title: 'LIVE SENSOR NODES'),
+                                if (visibleSensors.isEmpty)
+                                  const Padding(
+                                    padding: EdgeInsets.all(20),
+                                    child: Text('Searching for sensor data...',
+                                        style: TextStyle(fontSize: 12, color: Colors.grey)),
+                                  ),
+                                ...visibleSensors.map((s) => _buildSensorTile(s)),
 
-                            if (_selectedNode != null &&
-                                _selectedNode!.containsKey('sensor_id')) ...[
-                              const Divider(thickness: 2, height: 32),
-                              _buildNodeInfoTile(),
-                              _buildNodeHistoryList(_selectedNode!['sensor_id'].toString()),
-                            ],
+                                if (_selectedNode != null &&
+                                    _selectedNode!.containsKey('sensor_id')) ...[
+                                  const Divider(thickness: 2, height: 32),
+                                  _buildNodeInfoTile(),
+                                  _buildNodeHistoryList(_selectedNode!['sensor_id'].toString()),
+                                ],
 
-                            const Divider(height: 32),
-                            const _SectionHeader(title: 'COMMUTER REPORTS'),
-                            if (reports.isEmpty)
-                              const Padding(
-                                padding: EdgeInsets.all(20),
-                                child: Text('No active reports in the last 5 hours.',
-                                    style: TextStyle(fontSize: 12, color: Colors.grey)),
-                              ),
-                            ...reports.map((r) => _buildReportTile(r)),
-                          ],
+                                const Divider(height: 32),
+                                const _SectionHeader(title: 'COMMUTER REPORTS'),
+                                if (reports.isEmpty)
+                                  const Padding(
+                                    padding: EdgeInsets.all(20),
+                                    child: Text('No active reports in the last 5 hours.',
+                                        style: TextStyle(fontSize: 12, color: Colors.grey)),
+                                  ),
+                                ...reports.map((r) => _buildReportTile(r)),
+                              ],
+                            );
+                          },
                         );
                       },
                     );
@@ -221,127 +287,193 @@ class _LiveMapViewState extends State<LiveMapView> {
                     .from('user_reports')
                     .stream(primaryKey: ['id']),
                 builder: (context, reportSnapshot) {
-                  final sensors    = _getUniqueSensors(sensorSnapshot.data ?? []);
-                  final userReports = (reportSnapshot.data ?? []).where(_isReportActive).toList();
+                  return StreamBuilder<List<Map<String, dynamic>>>(
+                    stream: Supabase.instance.client
+                        .from('sensor_alert_dismissals')
+                        .stream(primaryKey: ['id'])
+                        .order('dismissed_at', ascending: false),
+                    builder: (context, dismissSnapshot) {
+                      final sensors = _getUniqueSensors(sensorSnapshot.data ?? []);
+                      final dismissed = _dismissedSensorKeys(dismissSnapshot.data ?? []);
+                      final visibleSensors = _filterVisibleSensors(sensors, dismissed);
+                      final userReports =
+                          (reportSnapshot.data ?? []).where(_isReportVisible).toList();
 
-                  // Build heatmap circles
-                  final List<CircleMarker> heatCircles = [];
-                  for (final s in sensors) {
-                    final e  = _getEnhancedSensorData(s);
-                    final pt = LatLng(e['latitude'], e['longitude']);
-                    final st = (s['status'] ?? '').toString().toLowerCase();
+                      // Build heatmap circles
+                      final List<CircleMarker> heatCircles = [];
+                      for (final s in visibleSensors) {
+                        final e = _getEnhancedSensorData(s);
+                        final pt = LatLng(e['latitude'], e['longitude']);
+                        final st = (s['status'] ?? '').toString().toLowerCase();
 
-                    if (st.contains('severe') || st.contains('impassable')) {
-                      heatCircles.addAll(_heatRings(pt, Colors.red,    severe: true));
-                    } else if (st.contains('risky') || st.contains('warning')) {
-                      heatCircles.addAll(_heatRings(pt, Colors.orange, severe: false));
-                    }
-                  }
-                  for (final r in userReports) {
-                    final pt = LatLng(_safeDouble(r['latitude']), _safeDouble(r['longitude']));
-                    final d  = (r['admin_decision'] ?? '').toString().toLowerCase();
-                    if (d == 'impassable') {
-                      heatCircles.addAll(_heatRings(pt, Colors.red,    severe: true));
-                    } else if (d == 'risky') {
-                      heatCircles.addAll(_heatRings(pt, Colors.orange, severe: false));
-                    }
-                  }
+                        if (st.contains('severe') || st.contains('impassable')) {
+                          heatCircles.addAll(_heatRings(pt, Colors.red, severe: true));
+                        } else if (st.contains('risky') || st.contains('warning')) {
+                          heatCircles.addAll(_heatRings(pt, Colors.orange, severe: false));
+                        }
+                      }
+                      for (final r in userReports) {
+                        final pt = LatLng(
+                          _safeDouble(r['latitude']),
+                          _safeDouble(r['longitude']),
+                        );
+                        final d = (r['admin_decision'] ?? '').toString().toLowerCase();
+                        if (d == 'impassable') {
+                          heatCircles.addAll(_heatRings(pt, Colors.red, severe: true));
+                        } else if (d == 'risky') {
+                          heatCircles.addAll(_heatRings(pt, Colors.orange, severe: false));
+                        }
+                      }
 
-                  return Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(15),
-                      ),
-                      child: Column(
-                        children: [
-                          // ── Header with legend — matches admin_dashboard ──
-                          const Padding(
-                            padding: EdgeInsets.all(16.0),
-                            child: Row(
-                              children: [
-                                Icon(Icons.location_searching, size: 18, color: Colors.blueAccent),
-                                SizedBox(width: 8),
-                                Text("Live Node Network",
-                                    style: TextStyle(fontWeight: FontWeight.bold)),
-                                Spacer(),
-                                _MapLegend(color: Colors.green,  label: "Normal"),
-                                _MapLegend(color: Colors.orange, label: "Risky"),
-                                _MapLegend(color: Colors.red,    label: "Severe"),
-                              ],
-                            ),
+                      return Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(15),
                           ),
-
-                          // ── Map body ──────────────────────────────────────
-                          Expanded(
-                            child: ClipRRect(
-                              borderRadius: const BorderRadius.vertical(
-                                  bottom: Radius.circular(15)),
-                              child: FlutterMap(
-                                mapController: _mapController,
-                                options: const MapOptions(
-                                  initialCenter: LatLng(10.2635, 123.8320),
-                                  initialZoom: 14,
+                          child: Column(
+                            children: [
+                              // ── Header with legend — matches admin_dashboard ──
+                              const Padding(
+                                padding: EdgeInsets.all(16.0),
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.location_searching, size: 18, color: Colors.blueAccent),
+                                    SizedBox(width: 8),
+                                    Text("Live Node Network",
+                                        style: TextStyle(fontWeight: FontWeight.bold)),
+                                    Spacer(),
+                                    _MapLegend(color: Colors.green, label: "Normal"),
+                                    _MapLegend(color: Colors.orange, label: "Risky"),
+                                    _MapLegend(color: Colors.red, label: "Severe"),
+                                  ],
                                 ),
-                                children: [
-                                  TileLayer(
-                                    urlTemplate:
-                                        'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                                  ),
+                              ),
 
-                                  // Heatmap rings
-                                  CircleLayer(circles: heatCircles),
+                              // ── Map body ──────────────────────────────────────
+                              Expanded(
+                                child: ClipRRect(
+                                  borderRadius: const BorderRadius.vertical(
+                                      bottom: Radius.circular(15)),
+                                  child: FlutterMap(
+                                    mapController: _mapController,
+                                    options: const MapOptions(
+                                      initialCenter: LatLng(10.2635, 123.8320),
+                                      initialZoom: 14,
+                                    ),
+                                    children: [
+                                      TileLayer(
+                                        urlTemplate:
+                                            'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                      ),
 
-                                  // Only user report markers — sensor nodes are shown in Sensor Network
-                                  MarkerLayer(
-                                    markers: [
-                                      // User report markers
-                                      ...userReports.map((r) {
-                                        final String decision = (r['admin_decision'] ?? 'Pending').toString();
-                                        final Color iconColor = _getDecisionColor(decision);
+                                      // Heatmap rings
+                                      CircleLayer(circles: heatCircles),
 
-                                        return Marker(
-                                          point: LatLng(_safeDouble(r['latitude']),
-                                              _safeDouble(r['longitude'])),
-                                          width: 140,
-                                          height: 70,
-                                          child: GestureDetector(
-                                            onTap: () => _showAdminActionDialog(r),
-                                            child: Column(
-                                              children: [
-                                                Container(
-                                                  padding: const EdgeInsets.symmetric(
-                                                      horizontal: 4, vertical: 2),
-                                                  decoration: BoxDecoration(
-                                                    color: Colors.white,
-                                                    borderRadius: BorderRadius.circular(4),
-                                                    boxShadow: const [
-                                                      BoxShadow(blurRadius: 2, color: Colors.black26),
-                                                    ],
-                                                  ),
-                                                  child: Text(
-                                                    "${r['location_name'] ?? 'Report'}\n$decision",
-                                                    textAlign: TextAlign.center,
-                                                    style: const TextStyle(
-                                                        fontSize: 7, fontWeight: FontWeight.bold),
-                                                  ),
+                                      // Labeled pin markers — sensor nodes
+                                      MarkerLayer(
+                                        markers: [
+                                          ...visibleSensors.map((s) {
+                                            final e = _getEnhancedSensorData(s);
+                                            final double cm =
+                                                _safeDouble(s['water_level_cm']);
+                                            final String status =
+                                                (s['status'] ?? 'No Data').toString();
+                                            final Color pinColor = _getStatusColor(status);
+
+                                            return Marker(
+                                              point: LatLng(e['latitude'], e['longitude']),
+                                              width: 140,
+                                              height: 70,
+                                              child: GestureDetector(
+                                                onTap: () => _handleSensorTap(s),
+                                                child: Column(
+                                                  children: [
+                                                    Container(
+                                                      padding: const EdgeInsets.symmetric(
+                                                          horizontal: 4, vertical: 2),
+                                                      decoration: BoxDecoration(
+                                                        color: Colors.white,
+                                                        borderRadius:
+                                                            BorderRadius.circular(4),
+                                                        boxShadow: const [
+                                                          BoxShadow(
+                                                              blurRadius: 2,
+                                                              color: Colors.black26),
+                                                        ],
+                                                      ),
+                                                      child: Text(
+                                                        "${e['display_name']}\n$status: ${cm.toStringAsFixed(0)}cm",
+                                                        textAlign: TextAlign.center,
+                                                        style: const TextStyle(
+                                                            fontSize: 7,
+                                                            fontWeight: FontWeight.bold),
+                                                      ),
+                                                    ),
+                                                    Icon(Icons.location_on,
+                                                        color: pinColor, size: 35),
+                                                  ],
                                                 ),
-                                                Icon(Icons.warning, color: iconColor, size: 35),
-                                              ],
-                                            ),
-                                          ),
-                                        );
-                                      }),
+                                              ),
+                                            );
+                                          }),
+
+                                          // User report markers
+                                          ...userReports.map((r) {
+                                            final String decision =
+                                                (r['admin_decision'] ?? 'Pending').toString();
+                                            final Color iconColor =
+                                                _getDecisionColor(decision);
+
+                                            return Marker(
+                                              point: LatLng(_safeDouble(r['latitude']),
+                                                  _safeDouble(r['longitude'])),
+                                              width: 140,
+                                              height: 70,
+                                              child: GestureDetector(
+                                                onTap: () => _showAdminActionDialog(r),
+                                                child: Column(
+                                                  children: [
+                                                    Container(
+                                                      padding: const EdgeInsets.symmetric(
+                                                          horizontal: 4, vertical: 2),
+                                                      decoration: BoxDecoration(
+                                                        color: Colors.white,
+                                                        borderRadius:
+                                                            BorderRadius.circular(4),
+                                                        boxShadow: const [
+                                                          BoxShadow(
+                                                              blurRadius: 2,
+                                                              color: Colors.black26),
+                                                        ],
+                                                      ),
+                                                      child: Text(
+                                                        "${r['location_name'] ?? 'Report'}\n$decision",
+                                                        textAlign: TextAlign.center,
+                                                        style: const TextStyle(
+                                                            fontSize: 7,
+                                                            fontWeight: FontWeight.bold),
+                                                      ),
+                                                    ),
+                                                    Icon(Icons.warning,
+                                                        color: iconColor, size: 35),
+                                                  ],
+                                                ),
+                                              ),
+                                            );
+                                          }),
+                                        ],
+                                      ),
                                     ],
                                   ),
-                                ],
+                                ),
                               ),
-                            ),
+                            ],
                           ),
-                        ],
-                      ),
-                    ),
+                        ),
+                      );
+                    },
                   );
                 },
               );
@@ -371,7 +503,7 @@ class _LiveMapViewState extends State<LiveMapView> {
     final Color rssiColor = rssi > -70 ? Colors.green : (rssi > -90 ? Colors.orange : Colors.red);
 
     return InkWell(
-      onTap: () => _onNodeSelected(data),
+      onTap: () => _handleSensorTap(data),
       borderRadius: BorderRadius.circular(14),
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -467,100 +599,416 @@ class _LiveMapViewState extends State<LiveMapView> {
     return s.isEmpty ? null : s;
   }
 
+  String _sensorModerationKey(Map<String, dynamic> sensor) {
+    final sensorId = (sensor['sensor_id'] ?? '').toString().trim().toLowerCase();
+    final status = (sensor['status'] ?? '').toString().trim().toLowerCase();
+    final eventTime = _parseAsUtc(sensor['created_at']);
+    final stamp = eventTime?.toIso8601String() ?? '';
+    return '$sensorId|$status|$stamp';
+  }
+
+  void _handleSensorTap(Map<String, dynamic> sensor) {
+    final status = (sensor['status'] ?? '').toString();
+    if (_isSensorAlertStatus(status)) {
+      _showSensorModerationDialog(sensor);
+      return;
+    }
+    _onNodeSelected(sensor);
+  }
+
   // ── Admin dialog ──────────────────────────────────────────────────────────
   void _showAdminActionDialog(Map<String, dynamic> report) {
     final imageUrl = _reportImageUrl(report);
+    final reasonController = TextEditingController();
+    String? reasonError;
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Verify Report'),
-        content: SizedBox(
-          width: 420,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Location: ${report['location_name'] ?? 'Unknown'}'),
-                const SizedBox(height: 4),
-                Text(
-                  'Current: ${report['admin_decision'] ?? 'Pending'}',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
-                ),
-                if (imageUrl != null) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    'Uploaded photo',
-                    style: TextStyle(
-                      fontWeight: FontWeight.w800,
-                      fontSize: 12,
-                      color: Colors.blueGrey.shade800,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setLocalState) {
+          final reportId = report['id']?.toString();
+          final deleting = _moderatingReportId != null && _moderatingReportId == reportId;
+          return AlertDialog(
+            title: const Text('Verify Report'),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Location: ${report['location_name'] ?? 'Unknown'}'),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Current: ${report['admin_decision'] ?? 'Pending'}',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: Image.network(
-                      imageUrl,
-                      width: double.infinity,
-                      fit: BoxFit.fitWidth,
-                      loadingBuilder: (context, child, loadingProgress) {
-                        if (loadingProgress == null) return child;
-                        return Container(
-                          height: 160,
-                          alignment: Alignment.center,
-                          color: Colors.blueGrey.withValues(alpha: 0.06),
-                          child: const SizedBox(
-                            width: 28,
-                            height: 28,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        );
-                      },
-                      errorBuilder: (_, __, ___) => Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(16),
-                        color: Colors.blueGrey.withValues(alpha: 0.1),
-                        child: Row(
-                          children: [
-                            Icon(Icons.broken_image_outlined,
-                                color: Colors.blueGrey.shade600),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                'Could not load image.',
-                                style: TextStyle(
-                                  color: Colors.blueGrey.shade700,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ],
+                    if (imageUrl != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        'Uploaded photo',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 12,
+                          color: Colors.blueGrey.shade800,
                         ),
                       ),
+                      const SizedBox(height: 6),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: Image.network(
+                          imageUrl,
+                          width: double.infinity,
+                          fit: BoxFit.fitWidth,
+                          loadingBuilder: (context, child, loadingProgress) {
+                            if (loadingProgress == null) return child;
+                            return Container(
+                              height: 160,
+                              alignment: Alignment.center,
+                              color: Colors.blueGrey.withValues(alpha: 0.06),
+                              child: const SizedBox(
+                                width: 28,
+                                height: 28,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            );
+                          },
+                          errorBuilder: (_, __, ___) => Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(16),
+                            color: Colors.blueGrey.withValues(alpha: 0.1),
+                            child: Row(
+                              children: [
+                                Icon(Icons.broken_image_outlined,
+                                    color: Colors.blueGrey.shade600),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Could not load image.',
+                                    style: TextStyle(
+                                      color: Colors.blueGrey.shade700,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: reasonController,
+                      maxLines: 2,
+                      decoration: InputDecoration(
+                        labelText: 'Delete reason (required for audit)',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        errorText: reasonError,
+                        isDense: true,
+                      ),
                     ),
-                  ),
-                ],
-              ],
+                  ],
+                ),
+              ),
             ),
-          ),
+            actions: [
+              TextButton(
+                onPressed: deleting ? null : () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              OutlinedButton.icon(
+                onPressed: deleting
+                    ? null
+                    : () async {
+                        final reason = reasonController.text.trim();
+                        if (reason.isEmpty) {
+                          setLocalState(() => reasonError = 'Reason is required');
+                          return;
+                        }
+                        setLocalState(() => reasonError = null);
+                        final ok = await _deleteUserReport(report, reason);
+                        if (ok && mounted) Navigator.of(this.context).pop();
+                      },
+                icon: deleting
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.delete_outline),
+                label: const Text('Delete'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+                onPressed: deleting ? null : () => _updateReportStatus(report['id'], 'Risky'),
+                child: const Text('Risky', style: TextStyle(color: Colors.white)),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                onPressed: deleting ? null : () => _updateReportStatus(report['id'], 'Impassable'),
+                child: const Text('Impassable', style: TextStyle(color: Colors.white)),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<bool> _deleteUserReport(Map<String, dynamic> report, String reason) async {
+    final reportId = report['id']?.toString();
+    if (reportId == null || reportId.isEmpty) return false;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete report?'),
+        content: const Text(
+          'This removes the report from active map/list and archives it for audit.',
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
-            onPressed: () => _updateReportStatus(report['id'], 'Risky'),
-            child: const Text('Risky', style: TextStyle(color: Colors.white)),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
           ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => _updateReportStatus(report['id'], 'Impassable'),
-            child: const Text('Impassable', style: TextStyle(color: Colors.white)),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
           ),
         ],
       ),
     );
+    if (confirmed != true) return false;
+
+    setState(() => _moderatingReportId = reportId);
+    try {
+      final res = await Supabase.instance.client.rpc(
+        'admin_delete_user_report',
+        params: {
+          'p_report_id': report['id'],
+          'p_reason': reason,
+        },
+      );
+      final map = res is Map
+          ? Map<String, dynamic>.from(res)
+          : <String, dynamic>{};
+      if (map['ok'] != true) {
+        final err = (map['error'] ?? 'unknown_error').toString();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Delete failed: $err'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return false;
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Report deleted and archived.'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+      return true;
+    } on PostgrestException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Delete failed: ${e.message}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return false;
+    } finally {
+      if (mounted) setState(() => _moderatingReportId = null);
+    }
+  }
+
+  Future<void> _showSensorModerationDialog(Map<String, dynamic> sensor) async {
+    final enhanced = _getEnhancedSensorData(sensor);
+    final sensorId = (sensor['sensor_id'] ?? '').toString();
+    final status = (sensor['status'] ?? '').toString();
+    final eventTime = _parseAsUtc(sensor['created_at']);
+    if (sensorId.isEmpty || status.isEmpty || eventTime == null) {
+      _onNodeSelected(sensor);
+      return;
+    }
+
+    final key = _sensorModerationKey(sensor);
+    final reasonController = TextEditingController();
+    String? reasonError;
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setLocalState) {
+          final dismissing = _moderatingSensorKey != null && _moderatingSensorKey == key;
+          return AlertDialog(
+            title: const Text('Verify Sensor Alert'),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Sensor: ${enhanced['display_name'] ?? sensorId}'),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Status: $status',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Event: ${eventTime.toLocal()}',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: reasonController,
+                      maxLines: 2,
+                      decoration: InputDecoration(
+                        labelText: 'Dismiss reason (required for audit)',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        errorText: reasonError,
+                        isDense: true,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: dismissing ? null : () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              FilledButton.tonal(
+                onPressed: dismissing
+                    ? null
+                    : () {
+                        _onNodeSelected(sensor);
+                        Navigator.pop(ctx);
+                      },
+                child: const Text('View Node'),
+              ),
+              FilledButton(
+                onPressed: dismissing
+                    ? null
+                    : () async {
+                        final reason = reasonController.text.trim();
+                        if (reason.isEmpty) {
+                          setLocalState(() => reasonError = 'Reason is required');
+                          return;
+                        }
+                        setLocalState(() => reasonError = null);
+                        final ok = await _dismissSensorAlert(
+                          sensorId: sensorId,
+                          status: status,
+                          eventTimeUtc: eventTime,
+                          reason: reason,
+                          moderationKey: key,
+                        );
+                        if (ok && mounted) Navigator.of(this.context).pop();
+                      },
+                child: dismissing
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('Dismiss Alert'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<bool> _dismissSensorAlert({
+    required String sensorId,
+    required String status,
+    required DateTime eventTimeUtc,
+    required String reason,
+    required String moderationKey,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Dismiss sensor alert?'),
+        content: const Text(
+          'This only hides the alert from active views and archives the action. Raw sensor logs are kept.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Dismiss'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return false;
+
+    setState(() => _moderatingSensorKey = moderationKey);
+    try {
+      final res = await Supabase.instance.client.rpc(
+        'admin_dismiss_sensor_alert',
+        params: {
+          'p_sensor_id': sensorId,
+          'p_status': status,
+          'p_event_time': eventTimeUtc.toIso8601String(),
+          'p_reason': reason,
+        },
+      );
+      final map = res is Map
+          ? Map<String, dynamic>.from(res)
+          : <String, dynamic>{};
+      if (map['ok'] != true) {
+        final err = (map['error'] ?? 'unknown_error').toString();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Dismiss failed: $err'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return false;
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Sensor alert dismissed and archived.'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+      return true;
+    } on PostgrestException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Dismiss failed: ${e.message}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return false;
+    } finally {
+      if (mounted) setState(() => _moderatingSensorKey = null);
+    }
   }
 
   Future<void> _updateReportStatus(dynamic id, String decision) async {

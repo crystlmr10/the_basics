@@ -328,6 +328,7 @@ class _RescueCenterPageState extends State<RescueCenterPage> {
     final data = await _supabase
         .from('user_reports')
         .select('*, profiles!user_reports_user_id_fkey(username, email)')
+        .isFilter('deleted_at', null)
         .order('created_at', ascending: false);
 
     final list = (data as List)
